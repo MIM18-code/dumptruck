@@ -1,0 +1,163 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Dumptruck</title>
+  <desc>Hand-inked dump truck. The body bobs on its suspension and the wheel hubs turn.</desc>
+  <!-- Animated twin of dumptruck_logo_handdrawn.svg, for the HTML offload reports.
+       Same paths, same wobble, same off-register marker fill - the only additions are
+       three grouping elements (.body, .hub) and the stylesheet below. Nothing here is
+       scripted, and no element carries a static CSS transform, so a renderer that
+       ignores CSS animation draws the original artwork exactly. -->
+
+  <style>
+    /* Body rides on the suspension; the tyres stay planted. */
+    .body {
+      animation: dt-bob 2.8s ease-in-out infinite;
+      will-change: transform;
+    }
+    @keyframes dt-bob {
+      0%   { transform: translateY(0px)  rotate(0deg); }
+      30%  { transform: translateY(-9px) rotate(-0.25deg); }
+      62%  { transform: translateY(3px)  rotate(0.14deg); }
+      100% { transform: translateY(0px)  rotate(0deg); }
+    }
+
+    /* Hubs turn inside the tyres. fill-box puts the pivot at each hub's own
+       centre, so no hard-coded origin can drift from the hand-drawn paths.
+       The truck faces left, so the hubs run counter-clockwise. */
+    .hub {
+      transform-box: fill-box;
+      transform-origin: 50% 50%;
+      animation: dt-roll 3.6s linear infinite;
+      will-change: transform;
+    }
+    .hub-rear { animation-duration: 3.55s; }   /* a touch out of step, by hand */
+    @keyframes dt-roll {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(-360deg); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .body, .hub { animation: none; }
+    }
+  </style>
+
+  <g transform="translate(-24,-52) rotate(-1.2 512 512)"
+     fill="none" stroke-linecap="round" stroke-linejoin="round">
+
+    <g class="body">
+      <!-- ================= MARKER FILLS (laid down fast, off-register) ================= -->
+      <!-- cab + frame, pushed down-right of the ink -->
+      <path d="M172 714 C154 662 145 600 149 574 C157 534 176 517 194 513
+               L270 509 C273 472 271 402 277 368 L426 362 L430 654 L952 648 L949 715 Z"
+            fill="#F2B03B"/>
+      <!-- hook over the cab -->
+      <path d="M398 306 L456 315 L454 351 L397 345 Z" fill="#F2B03B"/>
+      <!-- bed, spilling a little past the tailgate -->
+      <path d="M452 316 L944 480 L954 632 L458 638 Z" fill="#F2B03B"/>
+      <!-- second, darker pass along the belly -->
+      <path d="M470 606 L944 600 L952 640 L462 638 Z" fill="#E09A2C"/>
+      <!-- windscreen -->
+      <path d="M302 406 L394 398 L399 470 L307 476 Z" fill="#FDF3DC"/>
+      <!-- bumper nub -->
+      <path d="M112 656 L152 652 L155 702 L115 705 Z" fill="#E09A2C"/>
+
+      <!-- ================= INK: CAB ================= -->
+      <!-- nose -> hood -> pillar, in short strokes so the pressure varies -->
+      <path d="M152 710 C145 686 139 662 137 638 C136 626 136 618 137 610"
+            stroke="#2A2118" stroke-width="18"/>
+      <path d="M137 606 C135 582 138 552 150 532 C158 518 170 509 181 506"
+            stroke="#2A2118" stroke-width="14"/>
+      <path d="M184 505 C202 504 218 501 236 502 C246 502 254 501 260 501"
+            stroke="#2A2118" stroke-width="16"/>
+      <path d="M260 501 C271 500 276 498 281 494" stroke="#2A2118" stroke-width="10"/>
+      <path d="M263 494 C265 470 264 446 264 422 C264 400 267 380 272 360"
+            stroke="#2A2118" stroke-width="15"/>
+      <!-- roof, sagging a touch, with a tick past the corner -->
+      <path d="M272 360 C292 358 310 358 330 356 C350 354 368 355 386 353"
+            stroke="#2A2118" stroke-width="17"/>
+      <path d="M386 353 C400 352 410 351 418 349" stroke="#2A2118" stroke-width="13"/>
+      <path d="M418 349 C424 349 427 348 430 345" stroke="#2A2118" stroke-width="9"/>
+      <!-- back wall of the cab: the pen lifts halfway down -->
+      <path d="M420 358 C425 392 422 428 423 462 C423 492 423 512 424 528"
+            stroke="#2A2118" stroke-width="15"/>
+      <path d="M425 550 C428 578 426 606 426 626 C426 640 426 648 425 652"
+            stroke="#2A2118" stroke-width="12"/>
+
+      <!-- ================= INK: FRAME ================= -->
+      <path d="M150 712 C170 716 190 713 210 715 C226 716 236 714 244 714"
+            stroke="#2A2118" stroke-width="16"/>
+      <path d="M398 716 C436 720 472 717 508 719 C548 721 578 718 596 717"
+            stroke="#2A2118" stroke-width="13"/>
+      <path d="M604 717 C630 717 658 714 682 715 C694 715 700 714 702 714"
+            stroke="#2A2118" stroke-width="16"/>
+      <path d="M840 712 C862 714 884 711 906 712 C928 713 940 711 944 709"
+            stroke="#2A2118" stroke-width="15"/>
+      <path d="M953 640 C956 656 958 674 956 690 C955 700 951 707 947 710"
+            stroke="#2A2118" stroke-width="15"/>
+      <!-- bumper -->
+      <path d="M156 650 C140 651 124 652 111 654 C105 672 105 692 111 707
+               C126 708 142 707 157 705" stroke="#2A2118" stroke-width="13"/>
+
+      <!-- ================= INK: BED ================= -->
+      <!-- one stroke: up the hook, over the cab, then away along the top rail -->
+      <path d="M452 350 C434 347 414 344 396 341 C393 328 394 316 398 305
+               C418 308 438 311 456 315 C500 330 524 339 548 346
+               C566 352 578 357 590 364"
+            stroke="#2A2118" stroke-width="16"/>
+      <path d="M598 367 C622 374 644 383 668 391 C696 401 720 410 738 417"
+            stroke="#2A2118" stroke-width="13"/>
+      <path d="M748 421 C782 432 814 444 846 454 C888 467 918 473 934 477"
+            stroke="#2A2118" stroke-width="16"/>
+      <!-- tailgate, gone over twice near the corner -->
+      <path d="M936 479 C941 500 944 524 945 548 C946 574 947 600 946 620"
+            stroke="#2A2118" stroke-width="16"/>
+      <path d="M929 482 C935 502 938 518 939 532" stroke="#2A2118" stroke-width="8" opacity="0.8"/>
+      <!-- belly of the bed, sitting on the frame -->
+      <path d="M944 628 C892 634 842 638 790 639 C720 641 640 642 586 641
+               C556 640 538 641 528 641" stroke="#2A2118" stroke-width="15"/>
+      <path d="M520 640 C500 641 480 638 456 638" stroke="#2A2118" stroke-width="12"/>
+      <!-- front wall of the bed -->
+      <path d="M452 352 C456 400 456 450 457 500 C458 552 456 596 457 636"
+            stroke="#2A2118" stroke-width="16"/>
+      <!-- ribs, quick, not the same length -->
+      <path d="M610 392 C613 434 616 478 616 522 C616 560 615 584 615 600"
+            stroke="#2A2118" stroke-width="8" opacity="0.85"/>
+      <path d="M790 446 C793 480 796 516 796 552 C796 584 795 604 794 612"
+            stroke="#2A2118" stroke-width="7" opacity="0.85"/>
+
+      <!-- ================= INK: CAB DETAILS ================= -->
+      <path d="M314 478 C304 476 300 472 299 464 C296 438 296 416 300 402
+               C324 399 352 397 392 395" stroke="#2A2118" stroke-width="12"/>
+      <path d="M398 400 C402 426 403 450 401 472 C374 476 346 479 324 480"
+            stroke="#2A2118" stroke-width="12"/>
+      <!-- door handle -->
+      <path d="M306 524 C322 522 338 521 352 521" stroke="#2A2118" stroke-width="10"/>
+      <!-- headlight -->
+      <path d="M148 550 C161 546 171 554 169 566 C167 580 153 584 144 577
+               C135 570 138 553 148 550 Z" fill="#C4552F" stroke="#2A2118" stroke-width="9"/>
+    </g>
+
+    <!-- ================= WHEELS ================= -->
+    <!-- front tyre: lumpy, flatter on the bottom-left, definitely not a circle -->
+    <path d="M318 588 C384 585 434 638 436 700 C438 762 386 817 322 816
+             C258 815 203 766 206 700 C209 640 256 591 318 588"
+          fill="#33291F" stroke="#2A2118" stroke-width="16"/>
+    <g class="hub hub-front">
+      <path d="M318 652 C348 650 372 674 369 702 C366 732 340 751 314 748
+               C288 745 270 720 274 695 C278 670 297 654 318 652 Z"
+            fill="#FDF3DC" stroke="#2A2118" stroke-width="12"/>
+      <path d="M316 688 C327 686 334 694 332 703 C330 713 320 717 313 712
+               C305 707 306 690 316 688 Z" fill="#2A2118"/>
+    </g>
+    <!-- rear tyre: a slightly different lump -->
+    <path d="M772 586 C838 588 891 638 887 704 C883 768 830 817 766 814
+             C702 811 653 760 657 696 C661 634 710 584 772 586"
+          fill="#33291F" stroke="#2A2118" stroke-width="16"/>
+    <g class="hub hub-rear">
+      <path d="M770 651 C800 652 822 676 819 704 C816 732 791 750 765 747
+               C739 744 721 719 725 694 C729 670 749 650 770 651 Z"
+            fill="#FDF3DC" stroke="#2A2118" stroke-width="12"/>
+      <path d="M768 687 C779 687 785 696 783 704 C781 713 771 716 764 711
+               C756 706 758 687 768 687 Z" fill="#2A2118"/>
+    </g>
+  </g>
+</svg>
