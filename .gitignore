@@ -1,0 +1,23 @@
+.venv/
+.firecrawl/
+.tmp_codex/
+__pycache__/
+*.pyc
+DumptruckApp/build/
+DumptruckApp/.build/
+tools/braw-probe
+tools/r3d-probe
+tools/vendor/R3DSDK/
+packaging/vendor/
+packaging/dist/
+
+# Local credentials and signing material
+.env
+.env.*
+!.env.example
+*.p12
+*.p8
+*.pem
+.DS_Store
+tools/vendor/arri/
+tools/arri-probe

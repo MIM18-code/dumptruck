@@ -1,0 +1,48 @@
+Dumptruck camera component terms
+
+These terms apply only to r3d-probe, braw-probe, arri-probe, and their bundled
+proprietary runtime libraries, called the Camera Components below. They do not restrict
+Dumptruck's Apache-2.0 code, its artwork, or third-party open source components.
+Those works retain their respective licenses.
+
+Dumptruck shows these terms before it first uses the Camera Components and
+uses them only after you agree. By agreeing or by using the Camera Components,
+you accept these terms. If you do not agree, choose "Don't Use Camera Helpers";
+Dumptruck then copies and verifies media without them.
+
+MindInMotion LLC grants you a limited, nonexclusive right to use the Camera
+Components with Dumptruck and the corresponding vendor's files and products.
+You may make an archival or backup copy as permitted by applicable law. You
+may not otherwise reproduce, distribute, sell, sublicense, rent, loan, or lease
+the Camera Components. You may not reverse engineer, decompile, disassemble,
+or attempt to discover their source code or proprietary file formats, except
+to the extent applicable law prohibits such a restriction.
+
+Any other vendor software required by you must be obtained under a valid
+license from that vendor and used under its accompanying agreement. All rights,
+title, and intellectual property in the Camera Components remain with
+MindInMotion LLC and its suppliers, as applicable. No right in a vendor trademark
+is granted. Preserve all copyright and other proprietary notices.
+
+THE CAMERA COMPONENTS ARE PROVIDED AS IS. MINDINMOTION AND ITS SUPPLIERS
+DISCLAIM ALL WARRANTIES AND CONDITIONS, EXPRESS, IMPLIED, OR STATUTORY,
+INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT,
+ACCURACY, SECURITY, AND RELIABILITY, TO THE EXTENT PERMITTED BY APPLICABLE LAW.
+THEY DO NOT GUARANTEE COMPATIBILITY WITH EVERY FILE, CAMERA, OR FUTURE UPDATE.
+
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, MINDINMOTION AND ITS SUPPLIERS SHALL
+NOT BE LIABLE FOR DIRECT, INDIRECT, INCIDENTAL, SPECIAL, PUNITIVE, OR
+CONSEQUENTIAL DAMAGES, INCLUDING LOST DATA, LOST PROFITS, OR BUSINESS
+INTERRUPTION ARISING FROM THE CAMERA COMPONENTS, EVEN IF ADVISED OF THEIR
+POSSIBILITY. THEIR AGGREGATE LIABILITY SHALL NOT EXCEED US$100. THESE
+LIMITATIONS DO NOT EXCLUDE RIGHTS OR LIABILITY THAT CANNOT LAWFULLY BE EXCLUDED.
+
+MindInMotion LLC is responsible for support commitments it makes to recipients.
+No support obligation is imposed on a vendor by this distribution. These terms
+do not claim vendor certification or a vendor guarantee of performance.
+
+Copyright 2026 MindInMotion LLC, helper modifications.
+Copyright 2008-2026 RED DIGITAL CINEMA. All rights reserved.
+RED runtime software was developed using KAKADU software.
+Blackmagic RAW runtime copyright Blackmagic Design. All rights reserved.
+Additional required notices accompany the Camera Components.

@@ -1,0 +1,16 @@
+Dumptruck
+Copyright 2026 MindInMotion LLC and Dumptruck contributors.
+
+Dumptruck's original Python and Swift code, tests, packaging scripts, and
+public release documentation, generated artwork, and sounds are licensed
+under Apache-2.0. See LICENSE.
+
+The ASC MHL schema and ASC-derived C4 implementation retain the ASC MIT
+notice. Other third-party components retain their own licenses. See
+THIRD_PARTY_NOTICES.md and LICENSES/.
+
+The Apache license grant does not cover proprietary SDKs or helper sources in
+tools/braw-probe-src/ and tools/r3d-probe-src/, or internal research/,
+reviews/, DESIGN.md and HANDOFF.md in the private development checkout.
+These items are excluded from the public source archive pending rights review.
+This notice grants no rights to third-party trademarks or proprietary SDKs.

@@ -1,0 +1,27 @@
+{
+  "python": {
+    "file": "cpython-3.13.15+20260814-aarch64-apple-darwin-install_only_stripped.tar.gz",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260814/cpython-3.13.15%2B20260814-aarch64-apple-darwin-install_only_stripped.tar.gz",
+    "sha256": "6d472fc49a4d95e58214a992c4c92aa73fe2a935837a01a9a36bab0bec6d72f3"
+  },
+  "python_full": {
+    "file": "cpython-3.13.15+20260814-aarch64-apple-darwin-pgo+lto-full.tar.zst",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260814/cpython-3.13.15%2B20260814-aarch64-apple-darwin-pgo%2Blto-full.tar.zst",
+    "sha256": "c0ec5fd50fc18f51366eccd2558fa7f3c4bc23bca42fd295b9093e608fb88812"
+  },
+  "ffmpeg": {
+    "file": "ffmpeg-9.0.1.tar.xz",
+    "url": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz",
+    "sha256": "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635"
+  },
+  "xxhash": {
+    "file": "xxhash-4.0.1.tar.gz",
+    "url": "https://files.pythonhosted.org/packages/f6/a5/1386f35da1475fcaeef42581deae73417c6d2a6a0b2d2e8914de18844dcd/xxhash-4.0.1.tar.gz",
+    "sha256": "d55bf4ef10eb09b8b6866790e083d26d087d84caa3cc0946ba87c3ca7ecaf7b7"
+  },
+  "zlib_ng": {
+    "file": "zlib-ng-2.2.4.tar.gz",
+    "url": "https://github.com/python/cpython-source-deps/archive/refs/tags/zlib-ng-2.2.4.tar.gz",
+    "sha256": "00bbd88709bc416cb96160ab61d3e1c8f76e106799af7328d0fe434dc7dd5004"
+  }
+}
