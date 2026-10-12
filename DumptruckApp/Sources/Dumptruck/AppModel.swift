@@ -248,6 +248,9 @@ private final class EnginePipeState: @unchecked Sendable {
     var stderrText = ""
     var streamFailed = false
     var eventTail: Task<Void, Never>?
+    /// Parsed lines waiting for the next main-actor pass (nil: malformed).
+    var pendingLines: [[String: Any]?] = []
+    var drainScheduled = false
 
     init(jobID: UUID) {
         queue = DispatchQueue(label: "dumptruck.pipe.\(jobID)")
@@ -2201,14 +2204,44 @@ final class AppModel: ObservableObject {
             || reason == readingCardReason || reason == nameCardReason
     }
 
-    var startBlockedReason: String? {
+    /// Refusals that block every launch, single card or batch.
+    private var launchBlockedReason: String? {
         if journalError != nil {
             return "Job journal unavailable — resolve it before starting a transfer"
         }
         if let orphanRecoveryError {
             return "Interrupted engine recovery is blocked — \(orphanRecoveryError)"
         }
-        if let engineConfigurationError { return engineConfigurationError }
+        return engineConfigurationError
+    }
+
+    /// With no single card staged but cards in the batch, Start Offload
+    /// starts the batch. It used to answer "Pick a source disk or folder
+    /// first" over three Ready cards (Joshua, 2026-10-12).
+    var startRunsBatch: Bool {
+        sourcePath == nil && !batchStagingModel.candidates.isEmpty
+    }
+
+    /// What the toolbar's Start Offload would refuse with right now.
+    var toolbarStartBlockedReason: String? {
+        startRunsBatch ? batchStartBlockedReason : startBlockedReason
+    }
+
+    var batchStartBlockedReason: String? {
+        if let reason = launchBlockedReason { return reason }
+        if destinationPaths.isEmpty { return Self.noDestinationReason }
+        let staging = batchStagingModel
+        if staging.cardsReadyToQueue { return nil }
+        if staging.hasRefusedCard {
+            return "A card in the batch can't start — Review Batch shows why"
+        }
+        let waiting = max(staging.notReadyCount, 1)
+        return waiting == 1 ? "Waiting on 1 card in the batch…"
+            : "Waiting on \(waiting) cards in the batch…"
+    }
+
+    var startBlockedReason: String? {
+        if let reason = launchBlockedReason { return reason }
         if sourcePath == nil { return Self.pickSourceReason }
         if let inspectionError { return inspectionError }
         if sourceChangedSinceVerification { return Self.sourceChangedReason }
@@ -2584,6 +2617,10 @@ final class AppModel: ObservableObject {
     /// stale-disabled Start ate clicks after Settings changes and completed
     /// jobs), so the button stays clickable and EXPLAINS itself when blocked.
     func startOrExplain() {
+        if startRunsBatch {
+            startBatchOrExplain()
+            return
+        }
         if let reason = startBlockedReason {
             // A card read in progress settles by itself in seconds; pressing
             // Start a moment early must not throw away a staged retry.
@@ -2593,6 +2630,28 @@ final class AppModel: ObservableObject {
             return
         }
         start()
+    }
+
+    /// The batch window's Start, reached from the toolbar or ⌘R. A refusal
+    /// the operator has to look at (a refused card, a name that changed at
+    /// the queue edge) opens the batch window where the cards are listed.
+    func startBatchOrExplain() {
+        if let reason = batchStartBlockedReason {
+            lastSetupError = reason
+            startGateExplanation = reason
+            if batchStagingModel.hasRefusedCard { openBatchWindow() }
+            return
+        }
+        switch batchStagingModel.queueBatch(appModel: self) {
+        case .success:
+            lastSetupError = nil
+            startGateExplanation = nil
+        case .failure(let error):
+            let reason = batchStagingModel.generalError ?? error.description
+            lastSetupError = reason
+            startGateExplanation = reason
+            openBatchWindow()
+        }
     }
 
     func start(fast: Bool = false) {
@@ -3541,99 +3600,116 @@ final class AppModel: ObservableObject {
         @Sendable nonisolated func dispatchLine(_ line: Data) {
             guard !line.isEmpty else { return }
             let parsed = try? JSONSerialization.jsonObject(with: line) as? [String: Any]
+            // Lines queue here and one main-actor pass applies everything
+            // that has arrived. A task per line, each awaiting the last, ran
+            // one event per SwiftUI layout pass once the UI fell behind: two
+            // cards left a backlog the app never drained, and it sat at 100%
+            // CPU showing cards that had finished (Joshua, 2026-10-12).
+            stream.pendingLines.append(parsed)
+            guard !stream.drainScheduled else { return }
+            stream.drainScheduled = true
             let prior = stream.eventTail
             let next = Task { @MainActor [weak self] in
                 if let prior { await prior.value }
+                let batch: [[String: Any]?] = stream.queue.sync {
+                    let lines = stream.pendingLines
+                    stream.pendingLines.removeAll()
+                    stream.drainScheduled = false
+                    return lines
+                }
                 guard let self,
                       let job = self.jobs.first(where: { $0.id == jobID }) else { return }
-                // Strict stream framing (round-11 finding 5): a malformed
-                // nonempty line, a second hello, or ANY event after the
-                // terminal one is a protocol violation — fail closed, never
-                // silently skip or re-apply.
-                guard let obj = parsed else {
-                    job.engineProtocolOK = false
-                    if job.errorCount == 0 {
-                        job.error("engine emitted a malformed protocol line — result NOT trusted")
-                    }
-                    p.terminate()
-                    return
-                }
-                let event = obj["event"] as? String
-                if job.sawOffloadComplete {
-                    job.engineProtocolOK = false
-                    job.error("engine sent events after its terminal event — result NOT trusted")
-                    p.terminate()
-                    return
-                }
-                if event == "engine_hello" {
-                    if job.sawEngineHello {
+                var modelChanged = false
+                @MainActor func apply(_ parsed: [String: Any]?) {
+                    // Strict stream framing (round-11 finding 5): a malformed
+                    // nonempty line, a second hello, or ANY event after the
+                    // terminal one is a protocol violation — fail closed, never
+                    // silently skip or re-apply.
+                    guard let obj = parsed else {
                         job.engineProtocolOK = false
-                        job.error("engine repeated its handshake — result NOT trusted")
+                        if job.errorCount == 0 {
+                            job.error("engine emitted a malformed protocol line — result NOT trusted")
+                        }
                         p.terminate()
                         return
                     }
-                    job.sawEngineHello = true
-                    job.engineProtocolOK = (obj["protocol"] as? Int)
-                        == EngineContract.protocolVersion
-                    if !job.engineProtocolOK {
-                        job.error("engine protocol mismatch — this app needs protocol "
-                                  + "\(EngineContract.protocolVersion). "
-                                  + "Update the engine folder (Settings > Engine).")
+                    let event = obj["event"] as? String
+                    if job.sawOffloadComplete {
+                        job.engineProtocolOK = false
+                        job.error("engine sent events after its terminal event — result NOT trusted")
                         p.terminate()
+                        return
                     }
-                    return
-                }
-                // The hello is a handshake, not decoration: no engine event is
-                // meaningful until the required protocol was established, and the hello
-                // must be the first event in the stream.
-                guard job.sawEngineHello, job.engineProtocolOK else {
-                    if job.errorCount == 0 {
-                        job.error("engine sent data before the required protocol handshake — "
+                    if event == "engine_hello" {
+                        if job.sawEngineHello {
+                            job.engineProtocolOK = false
+                            job.error("engine repeated its handshake — result NOT trusted")
+                            p.terminate()
+                            return
+                        }
+                        job.sawEngineHello = true
+                        job.engineProtocolOK = (obj["protocol"] as? Int)
+                            == EngineContract.protocolVersion
+                        if !job.engineProtocolOK {
+                            job.error("engine protocol mismatch — this app needs protocol "
+                                      + "\(EngineContract.protocolVersion). "
+                                      + "Update the engine folder (Settings > Engine).")
+                            p.terminate()
+                        }
+                        return
+                    }
+                    // The hello is a handshake, not decoration: no engine event is
+                    // meaningful until the required protocol was established, and the hello
+                    // must be the first event in the stream.
+                    guard job.sawEngineHello, job.engineProtocolOK else {
+                        if job.errorCount == 0 {
+                            job.error("engine sent data before the required protocol handshake — "
+                                      + "result NOT trusted")
+                        }
+                        p.terminate()
+                        return
+                    }
+                    if event == "offload_complete",
+                       (obj["protocol"] as? Int) != EngineContract.protocolVersion {
+                        job.engineProtocolOK = false
+                        job.error("terminal event protocol mismatch — result NOT trusted")
+                        p.terminate()
+                        return
+                    }
+                    guard Self.apply(event: obj, to: job) else {
+                        // A safety-bearing event with missing/mistyped required
+                        // fields is a protocol violation, not a default: a v3
+                        // terminal event without its verdict Booleans used to
+                        // leave earlier optimistic state standing (round-15 PR
+                        // review finding 2 — fail-open on malformed terminal).
+                        job.engineProtocolOK = false
+                        job.error("engine sent a malformed \(event ?? "?") event — "
                                   + "result NOT trusted")
+                        p.terminate()
+                        return
                     }
-                    p.terminate()
-                    return
-                }
-                if event == "offload_complete",
-                   (obj["protocol"] as? Int) != EngineContract.protocolVersion {
-                    job.engineProtocolOK = false
-                    job.error("terminal event protocol mismatch — result NOT trusted")
-                    p.terminate()
-                    return
-                }
-                guard Self.apply(event: obj, to: job) else {
-                    // A safety-bearing event with missing/mistyped required
-                    // fields is a protocol violation, not a default: a v3
-                    // terminal event without its verdict Booleans used to
-                    // leave earlier optimistic state standing (round-15 PR
-                    // review finding 2 — fail-open on malformed terminal).
-                    job.engineProtocolOK = false
-                    job.error("engine sent a malformed \(event ?? "?") event — "
-                              + "result NOT trusted")
-                    p.terminate()
-                    return
-                }
-                if event == "job_started" {
-                    for previous in self.jobs where previous.id != job.id {
-                        for (lane, failure) in previous.custodyFailures where job.laneRoots.contains(lane) {
-                            if job.custodyFailures[lane].map({ $0.date < failure.date }) ?? true {
-                                job.custodyFailures[lane] = failure
+                    if event == "job_started" {
+                        for previous in self.jobs where previous.id != job.id {
+                            for (lane, failure) in previous.custodyFailures where job.laneRoots.contains(lane) {
+                                if job.custodyFailures[lane].map({ $0.date < failure.date }) ?? true {
+                                    job.custodyFailures[lane] = failure
+                                }
                             }
                         }
                     }
+                    // Job is its OWN ObservableObject: views observing the MODEL
+                    // (toolbar Start gate, eject locks) never see job mutations
+                    // unless we forward them (smoke-test finding: Start stayed
+                    // disabled forever after a job completed). Progress floods
+                    // are skipped — nothing model-level depends on them.
+                    let e = event
+                    if !Self.isFileActivityEvent(e) { modelChanged = true }
+                    if Self.journalRelevantEvent(e) {
+                        _ = self.persistJournal()
+                    }
                 }
-                // Job is its OWN ObservableObject: views observing the MODEL
-                // (toolbar Start gate, eject locks) never see job mutations
-                // unless we forward them (smoke-test finding: Start stayed
-                // disabled forever after a job completed). Progress floods
-                // are skipped — nothing model-level depends on them.
-                let e = event
-                if !Self.isFileActivityEvent(e) {
-                    self.objectWillChange.send()
-                }
-                if Self.journalRelevantEvent(e) {
-                    _ = self.persistJournal()
-                }
+                for parsed in batch { apply(parsed) }
+                if modelChanged { self.objectWillChange.send() }
             }
             stream.eventTail = next
         }

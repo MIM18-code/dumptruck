@@ -13,4 +13,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-exec swift run -c release ChecksRunner
+# Checks write presets and reports. Keep them out of the operator's real
+# Application Support folder. Not under /var or /tmp: those reach /private
+# through a symlink, and the journal's report-path check refuses them.
+mkdir -p "$HOME/Library/Caches"
+DUMPTRUCK_HOME="$(mktemp -d "$HOME/Library/Caches/dumptruck-checks.XXXXXX")"
+export DUMPTRUCK_HOME
+trap 'rm -rf "$DUMPTRUCK_HOME"' EXIT
+swift run -c release ChecksRunner

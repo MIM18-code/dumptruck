@@ -43,6 +43,9 @@ from .ignore import is_junk
 # 2 dests = 256 MiB peak.
 QUEUE_DEPTH = 32
 
+# Copy progress is a display heartbeat; ten a second is smooth enough.
+PROGRESS_INTERVAL_S = 0.1
+
 ASCMHL_DIRNAME = "ascmhl"
 CAMERA_MHL_QUARANTINE = "ascmhl_camera"
 
@@ -1610,6 +1613,7 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
     """The card-reader producer: one sequential pass over the source, staging
     writes and handing verify/commit to the per-destination pipeline workers.
     All destination I/O flows through the pinned root descriptors in root_fds."""
+    progress_beat = {"last_emit_time": 0.0}
     for entry in entries:
         source_file = os.path.join(source_root, entry.rel_path)
         fr = FileResult(rel_path=entry.rel_path, size=entry.size, mtime_ns=entry.mtime_ns)
@@ -1666,6 +1670,15 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
         ev({"event": "file_started", "path": entry.rel_path, "bytes": entry.size})
 
         def _progress(rel, done, size):
+            # One event per 4 MiB chunk reached the app hundreds of times a
+            # second per card, and each one re-laid out SwiftUI on the main
+            # thread: two cards pinned a core at 100% (Joshua, 2026-10-12).
+            # done is cumulative, so skipped events lose nothing; the last
+            # chunk of a file always goes out.
+            now = time.monotonic()
+            if done < size and now - progress_beat["last_emit_time"] < PROGRESS_INTERVAL_S:
+                return
+            progress_beat["last_emit_time"] = now
             ev({"event": "file_progress", "path": rel, "done": done, "size": size})
 
         write_errors = {}

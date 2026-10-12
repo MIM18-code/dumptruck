@@ -16,6 +16,7 @@ struct ConnectedShelf: View {
     @State private var shelfWidth: CGFloat = 600
     @State private var selectionAnchor: String?
     @State private var tileFrames: [String: CGRect] = [:]
+    @State private var sectionTileFrames: [String: CGRect] = [:]
     @State private var dropTargeted = false
 
     private struct ShelfEntry: Identifiable {
@@ -160,12 +161,19 @@ struct ConnectedShelf: View {
                                     })
                                     .volumeArrivalPulse(trigger: entry.endpoint.id, color: pulseColor(entry))
                                     .background(GeometryReader { geometry in
-                                        Color.clear.preference(key: ConnectedShelfFramesKey.self,
-                                            value: [entry.id: geometry.frame(in: .named("ConnectedShelfGrid"))])
+                                        Color.clear
+                                            .preference(key: ConnectedShelfFramesKey.self,
+                                                value: [entry.id: geometry.frame(in: .named("ConnectedShelfGrid"))])
+                                            .preference(key: ConnectedShelfSectionFramesKey.self,
+                                                value: [entry.id: geometry.frame(in: .named("ConnectedShelfSection"))])
                                     })
                             }
                         }
                         .padding(8)
+                        // Fill the visible shelf so the strip under the last
+                        // row starts a marquee too.
+                        .frame(maxWidth: .infinity, minHeight: shelfHeight(count: entries.count),
+                               alignment: .top)
                         .coordinateSpace(name: "ConnectedShelfGrid")
                         .background {
                             ConnectedShelfInteraction(paths: entries.map(\.id), frames: tileFrames,
@@ -182,6 +190,18 @@ struct ConnectedShelf: View {
 
                 }
                 .padding(.horizontal, 14).padding(.vertical, 10)
+                .coordinateSpace(name: "ConnectedShelfSection")
+                // The grid's own surface covers only the gaps between tiles.
+                // A sweep started from the header or the margins around the
+                // cards did nothing, so a group took Shift-clicks (Joshua,
+                // 2026-10-12). This surface covers the rest of the shelf.
+                .background {
+                    if !entries.isEmpty {
+                        ConnectedShelfInteraction(paths: entries.map(\.id), frames: sectionTileFrames,
+                                                  selection: $selection)
+                    }
+                }
+                .onPreferenceChange(ConnectedShelfSectionFramesKey.self) { sectionTileFrames = $0 }
                 .overlay(alignment: .top) { Divider() }
                 // The shelf is the unassigned pool, so a card dragged back
                 // here leaves whatever rail it was on (Joshua, 2026-10-05:

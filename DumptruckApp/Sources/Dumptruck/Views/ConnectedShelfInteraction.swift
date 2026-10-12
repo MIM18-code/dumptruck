@@ -108,3 +108,12 @@ struct ConnectedShelfFramesKey: PreferenceKey {
         value.merge(nextValue(), uniquingKeysWith: { _, new in new })
     }
 }
+
+/// Tile frames in the whole shelf section's space, for the surface that
+/// covers the header and margins around the grid.
+struct ConnectedShelfSectionFramesKey: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
