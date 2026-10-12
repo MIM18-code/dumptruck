@@ -97,14 +97,16 @@ struct ContentView: View {
                 // Read the gate BEFORE starting: once start() runs, canStart
                 // is answering about the job that just launched, not the click.
                 Button("Start Offload") {
-                    if model.canStart { Haptics.alignment() } else { Haptics.level() }
+                    if model.toolbarStartBlockedReason == nil { Haptics.alignment() } else { Haptics.level() }
                     model.startOrExplain()
                 }
                     // Brand amber, not the system accent: the one loud thing
                     // in the chrome (2026-08-26 facelift).
                     .buttonStyle(BrandProminentButtonStyle())
                     .keyboardShortcut(.defaultAction)
-                    .help(model.startBlockedReason ?? "Begin copy + verify")
+                    .help(model.toolbarStartBlockedReason
+                          ?? (model.startRunsBatch ? "Start the batch: copy + verify every card"
+                              : "Begin copy + verify"))
             }
         }
         .sheet(item: $forceEjectTarget) { ForceEjectSheet(volume: $0) }

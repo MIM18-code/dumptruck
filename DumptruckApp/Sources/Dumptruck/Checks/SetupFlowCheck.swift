@@ -8,7 +8,8 @@ import Foundation
 /// - ordinary next steps are told apart from real problems, and Start
 ///   waits out the card read instead of asking for a name;
 /// - two cards that both mount as "NO NAME" read apart;
-/// - the overlap refusal describes both directions.
+/// - the overlap refusal describes both directions;
+/// - Start Offload runs a staged batch when no single card is staged.
 enum SetupFlowCheck {
 
     @inline(__always)
@@ -161,6 +162,28 @@ enum SetupFlowCheck {
         model.batchStagingModel.cancelStaging()
         require(model.sourceCandidatesSnapshot.contains { $0.path == card },
                 "canceling the batch restores its remaining card")
+
+        // 9. With only a batch staged, Start Offload starts the batch. It
+        //    used to say "Pick a source disk or folder first" over three
+        //    Ready cards (Joshua, 2026-10-12).
+        if model.sourcePath != nil { model.clearSource() }
+        model.batchStagingModel.candidates = [BatchSourceCandidate(path: card),
+                                              BatchSourceCandidate(path: card2)]
+        require(model.startRunsBatch, "a staged batch with no single card is what Start runs")
+        require(model.toolbarStartBlockedReason != AppModel.pickSourceReason,
+                "Start must not ask for a source while a batch is staged")
+        if model.engineConfigurationError == nil {
+            require(model.toolbarStartBlockedReason == AppModel.noDestinationReason,
+                    "a batch without destinations asks for one, got "
+                    + String(describing: model.toolbarStartBlockedReason))
+            model.startOrExplain()
+            require(model.lastSetupError == AppModel.noDestinationReason,
+                    "a blocked batch Start explains itself")
+        }
+        require(model.jobs.isEmpty, "a blocked batch Start creates no job")
+        model.batchStagingModel.cancelStaging()
+        model.lastSetupError = nil
+        require(!model.startRunsBatch, "an empty batch leaves Start on the single card")
 
         let previousBatch = model.batchStagingModel
         model.batchStagingModel = BatchSourceStagingModel()

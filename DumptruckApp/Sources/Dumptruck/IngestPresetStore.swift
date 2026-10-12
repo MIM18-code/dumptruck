@@ -63,6 +63,14 @@ final class IngestPresetStore: ObservableObject {
     static let shared = IngestPresetStore(fileURL: defaultFileURL)
 
     static var defaultFileURL: URL {
+        // DUMPTRUCK_HOME is the engine's app-support folder too. Checks set
+        // it to a scratch folder; without this the setup-flow check wrote
+        // its temporary destination into the operator's real presets file
+        // (found 2026-10-12).
+        if let home = ProcessInfo.processInfo.environment["DUMPTRUCK_HOME"], !home.isEmpty {
+            return URL(fileURLWithPath: home, isDirectory: true)
+                .appendingPathComponent("ingest-presets.json", isDirectory: false)
+        }
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory,
                            in: .userDomainMask).first

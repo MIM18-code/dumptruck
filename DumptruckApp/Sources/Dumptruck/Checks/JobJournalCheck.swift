@@ -117,13 +117,17 @@ nested.manifestPaths = [
     nestedRoots[1] + "/ascmhl/0001_DCIM_2026-08-22_032447Z.mhl",
     nestedRoots[1] + "/DCIM_2026-08-22_032447.mhl",
 ]
+// The local report copy lives under the app home the validator reads:
+// DUMPTRUCK_HOME when set (run_checks.sh sets it), else Application Support.
+let localReports = (ProcessInfo.processInfo.environment["DUMPTRUCK_HOME"]
+    ?? NSHomeDirectory() + "/Library/Application Support/Dumptruck") + "/reports/DCIM"
 nested.reportPaths = [
     "/Volumes/DT20_DEST_A/SHOW/Raws/DUMPTRUCK_TEST/Raws/Reports/DCIM/DCIM_offload.html",
     "/Volumes/DT20_DEST_B/SHOW/Raws/DUMPTRUCK_TEST/Raws/Reports/DCIM/DCIM_offload.html",
-    "/Users/joshualand/Library/Application Support/Dumptruck/reports/DCIM/DCIM_offload.html",
+    localReports + "/DCIM_offload.html",
     "/Volumes/DT20_DEST_A/SHOW/Raws/DUMPTRUCK_TEST/Raws/Reports/DCIM/DCIM_offload.pdf",
     "/Volumes/DT20_DEST_B/SHOW/Raws/DUMPTRUCK_TEST/Raws/Reports/DCIM/DCIM_offload.pdf",
-    "/Users/joshualand/Library/Application Support/Dumptruck/reports/DCIM/DCIM_offload.pdf",
+    localReports + "/DCIM_offload.pdf",
 ]
 nested.reportPath = nested.reportPaths[0]
 nested.receiptPath = "/Volumes/DT20_DEST_A/SHOW/Raws/DUMPTRUCK_TEST/Raws/Reports/DCIM/DCIM_offload.receipt.json"

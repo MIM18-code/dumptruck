@@ -1394,110 +1394,46 @@ struct JobHeaderBand: View {
             }
             Spacer(minLength: 0)
         }
-        // Four fixed-size controls want ~458pt; the 440pt center minimum
-        // leaves ~384pt after card padding (codex + opus review of the
-        // 2026-09-04 audit commit). Fall back to two rows rather than
-        // overflow the card or truncate labels again.
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                Spacer()
-                ejectSourceButton
-                evidenceButton
-                openReportMenu
-                stageRetryButton
-            }
-            VStack(alignment: .trailing, spacing: 6) {
-                HStack(spacing: 8) {
-                    Spacer()
-                    ejectSourceButton
-                    evidenceButton
-                }
-                HStack(spacing: 8) {
-                    Spacer()
-                    openReportMenu
-                    stageRetryButton
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var ejectSourceButton: some View {
-        if job.verdict == .safeToWipe,
-           model.isCurrentSourceVerdict(job),
-           let vol = model.volumes.first(where: { $0.path == job.sourcePath }),
-           model.canEject(vol) {
-            // The earned-friction gradient: a green card ejects its
-            // source in one click, right where the verdict lives.
-            Button {
-                // Re-validate at CLICK time: a continuation may have
-                // started since this button rendered (Ox review, F1 —
-                // the notification path already does this).
+        // Plain values, compared before the row rebuilds. Rebuilt on every
+        // job update, the split Open Report button (an AppKit segmented
+        // control) was re-measured twice per pass inside ViewThatFits, and
+        // that measuring is what held the main thread at 100% (sampled
+        // 2026-10-12). Unchanged inputs now keep the cached size.
+        ReceiptActionRow(
+            jobID: job.id,
+            ejectLabel: ejectableSourceLabel,
+            reportPath: shownReportPath,
+            canRetry: job.launchPlanSnapshot != nil,
+            eject: { [job, model] in
+                // Re-validate at CLICK time: a continuation may have started
+                // since this row rendered (Ox review, F1 — the notification
+                // path already does this).
                 guard job.verdict == .safeToWipe,
                       model.isCurrentSourceVerdict(job),
+                      let vol = model.volumes.first(where: { $0.path == job.sourcePath }),
                       model.canEject(vol) else { return }
                 model.eject(vol)
-            } label: {
-                Label("Eject Source", systemImage: "eject.fill")
-            }
-            .controlSize(.small)
-            .fixedSize()
-            .tint(Semantics.successText)
-            .accessibilityLabel("Eject source \(job.label)")
-        }
+            },
+            showEvidence: { evidenceSheetShown = true },
+            quickLook: { quickLookURL = URL(fileURLWithPath: $0) },
+            retry: { [job, model] in _ = model.stageRetry(job) })
+            .equatable()
     }
 
-    private var evidenceButton: some View {
-        Button {
-            evidenceSheetShown = true
-        } label: {
-            Label("Evidence", systemImage: "doc.text.magnifyingglass")
-        }
-        .controlSize(.small)
-        .fixedSize()
-        .help("Inspect recorded checksums, ASC MHL manifests, and emitted reports")
+    /// The card label when its source can be ejected from here: the
+    /// earned-friction gradient, a green card ejects its source in one click
+    /// right where the verdict lives.
+    private var ejectableSourceLabel: String? {
+        guard job.verdict == .safeToWipe,
+              model.isCurrentSourceVerdict(job),
+              let vol = model.volumes.first(where: { $0.path == job.sourcePath }),
+              model.canEject(vol) else { return nil }
+        return job.label
     }
 
-    @ViewBuilder
-    private var openReportMenu: some View {
+    private var shownReportPath: String? {
         let safeReports = JobEvidenceParser.validatedReportPaths(for: job) ?? []
-        if let report = safeReports.first(where: { $0 == job.reportPath }) ?? safeReports.first {
-            Menu {
-                Button("Open Report") {
-                    FinderEvidenceActions.openFileOrFolder(report)
-                }
-                Button("Quick Look Report") {
-                    quickLookURL = URL(fileURLWithPath: report)
-                }
-                Button("Reveal in Finder") {
-                    FinderEvidenceActions.revealInFinder(report)
-                }
-                Button("Copy Report Path") {
-                    FinderEvidenceActions.copyToPasteboard(report)
-                }
-            } label: {
-                Label("Open Report", systemImage: "doc.text")
-            } primaryAction: {
-                FinderEvidenceActions.openFileOrFolder(report)
-            }
-            .menuStyle(.button)
-            .controlSize(.small)
-            .fixedSize()
-        }
-    }
-
-    @ViewBuilder
-    private var stageRetryButton: some View {
-        if job.launchPlanSnapshot != nil {
-            Button {
-                _ = model.stageRetry(job)
-            } label: {
-                Label("Stage Retry", systemImage: "arrow.clockwise")
-            }
-            .controlSize(.small)
-            .fixedSize()
-            .help("Restore the original source, destinations, and rendered folder; Start remains manual")
-        }
+        return safeReports.first(where: { $0 == job.reportPath }) ?? safeReports.first
     }
 
     private var elapsedText: String? {
@@ -1906,5 +1842,113 @@ struct QueueControlBar: View {
             .strokeBorder(model.isDispatchPaused
                           ? Semantics.warning.opacity(0.3)
                           : Semantics.running.opacity(0.2)))
+    }
+}
+
+/// A settled card's actions. Equatable on the values it shows, so a job
+/// update that changes none of them leaves the row, and its measured size,
+/// alone. The closures are not compared; they act on the job at click time.
+private struct ReceiptActionRow: View, Equatable {
+    let jobID: UUID
+    let ejectLabel: String?
+    let reportPath: String?
+    let canRetry: Bool
+    let eject: () -> Void
+    let showEvidence: () -> Void
+    let quickLook: (String) -> Void
+    let retry: () -> Void
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.jobID == rhs.jobID && lhs.ejectLabel == rhs.ejectLabel
+            && lhs.reportPath == rhs.reportPath && lhs.canRetry == rhs.canRetry
+    }
+
+    var body: some View {
+        // Four fixed-size controls want ~458pt; the 440pt center minimum
+        // leaves ~384pt after card padding (codex + opus review of the
+        // 2026-09-04 audit commit). Fall back to two rows rather than
+        // overflow the card or truncate labels again.
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                Spacer()
+                ejectSourceButton
+                evidenceButton
+                openReportMenu
+                stageRetryButton
+            }
+            VStack(alignment: .trailing, spacing: 6) {
+                HStack(spacing: 8) {
+                    Spacer()
+                    ejectSourceButton
+                    evidenceButton
+                }
+                HStack(spacing: 8) {
+                    Spacer()
+                    openReportMenu
+                    stageRetryButton
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var ejectSourceButton: some View {
+        if let ejectLabel {
+            Button(action: eject) {
+                Label("Eject Source", systemImage: "eject.fill")
+            }
+            .controlSize(.small)
+            .fixedSize()
+            .tint(Semantics.successText)
+            .accessibilityLabel("Eject source \(ejectLabel)")
+        }
+    }
+
+    private var evidenceButton: some View {
+        Button(action: showEvidence) {
+            Label("Evidence", systemImage: "doc.text.magnifyingglass")
+        }
+        .controlSize(.small)
+        .fixedSize()
+        .help("Inspect recorded checksums, ASC MHL manifests, and emitted reports")
+    }
+
+    @ViewBuilder
+    private var openReportMenu: some View {
+        if let report = reportPath {
+            Menu {
+                Button("Open Report") {
+                    FinderEvidenceActions.openFileOrFolder(report)
+                }
+                Button("Quick Look Report") {
+                    quickLook(report)
+                }
+                Button("Reveal in Finder") {
+                    FinderEvidenceActions.revealInFinder(report)
+                }
+                Button("Copy Report Path") {
+                    FinderEvidenceActions.copyToPasteboard(report)
+                }
+            } label: {
+                Label("Open Report", systemImage: "doc.text")
+            } primaryAction: {
+                FinderEvidenceActions.openFileOrFolder(report)
+            }
+            .menuStyle(.button)
+            .controlSize(.small)
+            .fixedSize()
+        }
+    }
+
+    @ViewBuilder
+    private var stageRetryButton: some View {
+        if canRetry {
+            Button(action: retry) {
+                Label("Stage Retry", systemImage: "arrow.clockwise")
+            }
+            .controlSize(.small)
+            .fixedSize()
+            .help("Restore the original source, destinations, and rendered folder; Start remains manual")
+        }
     }
 }
