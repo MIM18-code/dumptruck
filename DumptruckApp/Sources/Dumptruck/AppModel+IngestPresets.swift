@@ -34,12 +34,13 @@ extension AppModel {
     func saveCurrentIngestPreset(named name: String,
                                  confirmOverwrite: Bool = false) -> String? {
         refreshVolumes()
-        guard !destinationPaths.isEmpty else {
+        let anchors = destinationAnchorsWithoutExtraFolders
+        guard !anchors.isEmpty else {
             let message = "Add at least one destination before saving an ingest preset."
             lastSetupError = message
             return message
         }
-        if let error = validatePresetEndpoints(destinationAnchors: destinationPaths,
+        if let error = validatePresetEndpoints(destinationAnchors: anchors,
                                                mirroredFolder: destinationFolderRelativePath) {
             lastSetupError = error
             return error
@@ -65,7 +66,7 @@ extension AppModel {
         }
         if let error = ingestPresetStore.upsert(
             name: name,
-            destinationAnchors: destinationPaths,
+            destinationAnchors: anchors,
             mirroredDestinationFolder: destinationFolderRelativePath,
             settings: settings,
             confirmOverwrite: confirmOverwrite) {
@@ -197,9 +198,12 @@ extension AppModel {
     /// store retains the last non-empty set, including stale paths, so the
     /// next restore can explain which drive needs to be reinserted.
     func rememberCurrentIngestDestinations() {
-        guard !destinationPaths.isEmpty else { return }
+        // Extra folders stay out of the remembered set: it restores drives
+        // with the mirrored folder, which would misplace an exact folder.
+        let anchors = destinationAnchorsWithoutExtraFolders
+        guard !anchors.isEmpty else { return }
         _ = ingestPresetStore.rememberDestinations(
-            destinationPaths,
+            anchors,
             mirroredFolder: destinationFolderRelativePath)
     }
 

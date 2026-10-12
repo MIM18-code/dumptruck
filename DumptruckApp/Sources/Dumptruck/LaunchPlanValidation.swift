@@ -36,9 +36,20 @@ enum LaunchPlanValidation {
         // Static string containment catches malformed persisted plans before
         // any live filesystem check. Symlink resolution and identity pins are
         // deliberately rechecked by AppModel immediately before Start.
+        if let exact = plan.exactRoots {
+            guard Set(exact).count == exact.count,
+                  exact.allSatisfy({ plan.rawRoots.contains($0) }),
+                  exact.count < plan.rawRoots.count else { return false }
+        }
+        guard !cardFoldersOverlap(plan.destinations, cardLabel: plan.cardLabel,
+                                  caseSensitive: plan.destinations.map { _ in true }) else {
+            return false
+        }
         for (root, destination) in zip(plan.rawRoots, plan.destinations) {
             let projected = DestinationFolderProjection.project(
-                root: root, mirroredFolder: plan.mirroredFolder,
+                root: root,
+                mirroredFolder: DestinationFolderProjection.mirroredFolder(
+                    plan.mirroredFolder, for: root, exactRoots: plan.exactRoots),
                 organizationFolder: plan.organizationFolder)
             // The GUI passes the organization base; the engine appends the
             // card-label continuation folder exactly once. Accepting an
@@ -120,6 +131,43 @@ enum LaunchPlanValidation {
                   !containsControl(String(component)) else { return false }
         }
         return true
+    }
+
+    /// Two destinations on one drive must never put one card folder inside
+    /// the other: the outer copy would absorb the inner one's files.
+    /// Unicode spellings always compare as one name (APFS and HFS+ are
+    /// normalization-insensitive). Case spellings compare as one name unless
+    /// both folders of a pair are case-sensitive: `caseSensitive[i]` says
+    /// whether destination i's volume reports case-sensitive names, so
+    /// `Shoot` and `shoot` stay distinct on a case-sensitive volume, as on
+    /// main, whatever the other destinations are. Persisted-plan validation
+    /// passes all true, so an old journal record is never invalidated by a
+    /// case rule it predates; the engine re-checks the real filesystem.
+    static func cardFoldersOverlap(_ destinations: [String], cardLabel: String,
+                                   caseSensitive: [Bool]) -> Bool {
+        let nfc = destinations.map {
+            ($0 as NSString).appendingPathComponent(cardLabel)
+                .precomposedStringWithCanonicalMapping
+        }
+        let folded = nfc.map { $0.folding(options: .caseInsensitive, locale: nil) }
+        for i in nfc.indices {
+            for j in nfc.indices where j > i {
+                let both = i < caseSensitive.count && j < caseSensitive.count
+                    && caseSensitive[i] && caseSensitive[j]
+                let keys = both ? nfc : folded
+                if pathOverlaps(keys[i], keys[j]) { return true }
+            }
+        }
+        return false
+    }
+
+    /// True only when `path` sits on a volume that reports case-sensitive
+    /// names. Unknown or unreadable volumes count as case-insensitive
+    /// (fail closed), matching the engine's probe.
+    static func isCaseSensitive(_ path: String) -> Bool {
+        let values = try? URL(fileURLWithPath: path)
+            .resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
+        return values?.volumeSupportsCaseSensitiveNames == true
     }
 
     private static func pathOverlaps(_ a: String, _ b: String) -> Bool {

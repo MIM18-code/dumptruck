@@ -16,6 +16,9 @@ package enum DumptruckChecks {
         try ExistingVerificationCheck.run()
         print("ExistingVerificationCheck: PASS")
 
+        try ExtraDestinationFolderCheck.run()
+        print("ExtraDestinationFolderCheck: PASS")
+
         try HistoryExportCheck.run()
         print("HistoryExportCheck: PASS")
 
@@ -52,6 +55,6 @@ package enum DumptruckChecks {
         try await WebhookNotificationCheck.run()
         print("WebhookNotificationCheck: PASS")
 
-        print("All 17 check suites passed.")
+        print("All 18 check suites passed.")
     }
 }

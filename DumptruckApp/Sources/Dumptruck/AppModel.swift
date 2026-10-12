@@ -275,6 +275,20 @@ final class AppModel: ObservableObject {
     @Published private(set) var sourceMutationMonitoringActive = false
     @Published var destinationPaths: [String] = [] {
         didSet {
+            // An extra folder only exists alongside its drive's destination:
+            // whatever removed the folder removes its marker, and whatever
+            // removed the drive (unassign, setSource on a folder of it, an
+            // unmount) removes the folder. Assigning here does not re-enter
+            // this observer.
+            exactDestinationRoots.removeAll { !destinationPaths.contains($0) }
+            let anchors = destinationAnchorsWithoutExtraFolders
+            let orphaned = exactDestinationRoots.filter { extra in
+                !anchors.contains { pathIsAtOrInsideLexically(extra, root: $0) }
+            }
+            if !orphaned.isEmpty {
+                destinationPaths.removeAll { orphaned.contains($0) }
+                exactDestinationRoots.removeAll { orphaned.contains($0) }
+            }
             refreshCandidateSnapshots()
             // Cards waiting in the batch were held for "no destinations";
             // re-inspect them here, not in the batch window, because that
@@ -284,6 +298,14 @@ final class AppModel: ObservableObject {
                 batchStagingModel.startSerialInspection(appModel: self)
             }
         }
+    }
+    /// Extra destination folders on a drive that is already a destination,
+    /// used exactly as picked (no mirrored folder below them). Tucked away in
+    /// the drive row's context menu; the engine still counts the drive once.
+    @Published private(set) var exactDestinationRoots: [String] = []
+    /// The drives (and plain folders) that carry the mirrored folder.
+    var destinationAnchorsWithoutExtraFolders: [String] {
+        destinationPaths.filter { !exactDestinationRoots.contains($0) }
     }
     /// A single relative folder projected below every selected destination
     /// anchor. Choosing it on one drive mirrors the same structure on all the
@@ -1493,12 +1515,18 @@ final class AppModel: ObservableObject {
         continuationFreeze = nil
         stagedRetryJobID = nil
         stagedRetryLabel = nil
-        destinationPaths.removeAll { $0 == path }
+        destinationPaths.removeAll { $0 == path || isExtraFolder($0, onDrive: path) }
         if destinationPaths.isEmpty { destinationFolderRelativePath = "" }
         rememberCurrentIngestDestinations()
         // Removing a destination is the usual fix for the refusal on screen
         // (an overlap, a full drive); a stale one reads as a live problem.
         lastSetupError = nil
+    }
+
+    private func isExtraFolder(_ candidate: String, onDrive anchor: String) -> Bool {
+        exactDestinationRoots.contains(candidate)
+            && !exactDestinationRoots.contains(anchor)
+            && pathIsAtOrInsideLexically(candidate, root: anchor)
     }
 
     func toggleDestination(_ path: String) {
@@ -1507,7 +1535,7 @@ final class AppModel: ObservableObject {
         stagedRetryJobID = nil
         stagedRetryLabel = nil
         if destinationPaths.contains(path) {
-            destinationPaths.removeAll { $0 == path }
+            destinationPaths.removeAll { $0 == path || isExtraFolder($0, onDrive: path) }
             if destinationPaths.isEmpty { destinationFolderRelativePath = "" }
             rememberCurrentIngestDestinations()
             lastSetupError = nil
@@ -1623,6 +1651,71 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// Also copy to another folder on a drive that is already a destination.
+    /// The folder is used exactly as picked; the drive still counts as one
+    /// physical copy for SAFE TO WIPE (the engine counts devices, not paths).
+    func chooseExtraDestinationFolder(onDrive anchor: String) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = URL(fileURLWithPath: anchor)
+        panel.prompt = "Also Copy Here"
+        guard panel.runModal() == .OK, let picked = panel.url?.path else { return }
+        _ = addExtraDestinationFolder(picked, onDrive: anchor)
+    }
+
+    @discardableResult
+    func addExtraDestinationFolder(_ rawPath: String, onDrive anchor: String) -> Bool {
+        let path = URL(fileURLWithPath: rawPath).standardizedFileURL.path
+        guard destinationPaths.contains(anchor), !exactDestinationRoots.contains(anchor) else {
+            lastSetupError = "Add the drive as a destination first"
+            return false
+        }
+        guard path != anchor, pathIsAtOrInsideLexically(path, root: anchor) else {
+            lastSetupError = "Choose a folder inside \(endpointDisplayName(anchor))"
+            return false
+        }
+        let resolved = (path as NSString).resolvingSymlinksInPath
+        let anchorResolved = (anchor as NSString).resolvingSymlinksInPath
+        guard resolved == path, resolved.hasPrefix(anchorResolved + "/") else {
+            lastSetupError = "That folder uses a symlink — choose the real folder on the drive"
+            return false
+        }
+        if let reason = assignmentBlockedReason(path, as: .destination) {
+            lastSetupError = reason
+            return false
+        }
+        guard !destinationPaths.contains(path),
+              !exactDestinationRoots.contains(where: { pathsOverlap($0, path) }) else {
+            lastSetupError = "That folder is already a destination, or overlaps one"
+            return false
+        }
+        // Checked again with the final card name when the plan is built.
+        let label = self.label.isEmpty ? "CARD" : self.label
+        let rendered = effectiveDestinations(destinationPaths + [path], forSource: sourcePath,
+                                             extraRoots: exactDestinationRoots + [path])
+        if LaunchPlanValidation.cardFoldersOverlap(
+            rendered, cardLabel: label,
+            caseSensitive: (destinationPaths + [path]).map(LaunchPlanValidation.isCaseSensitive)) {
+            lastSetupError = "That folder would put one card folder inside another destination's. "
+                + "Choose a folder outside it."
+            return false
+        }
+        stagedRetryPlan = nil
+        continuationFreeze = nil
+        stagedRetryJobID = nil
+        stagedRetryLabel = nil
+        destinationPaths.append(path)
+        exactDestinationRoots.append(path)
+        lastSetupError = nil
+        return true
+    }
+
+    func isExtraDestinationFolder(_ path: String) -> Bool {
+        exactDestinationRoots.contains(path)
+    }
+
     func clearMirroredDestinationFolder() {
         destinationFolderRelativePath = ""
         stagedRetryPlan = nil
@@ -1640,6 +1733,7 @@ final class AppModel: ObservableObject {
     func installPresetDestinationSelection(anchors: [String],
                                            mirroredFolder: String) {
         continuationFreeze = nil
+        exactDestinationRoots = []
         destinationPaths = anchors
         destinationFolderRelativePath = mirroredFolder
         rememberCurrentIngestDestinations()
@@ -1686,7 +1780,9 @@ final class AppModel: ObservableObject {
         // inspect. The retry context is installed afterward so its label and
         // rendered organization folder win when that inspect returns.
         setSource(plan.src)
+        exactDestinationRoots = []
         destinationPaths = plan.rawRoots
+        exactDestinationRoots = plan.exactRoots
         destinationFolderRelativePath = plan.mirroredFolder
         rememberCurrentIngestDestinations()
         label = plan.cardLabel
@@ -1758,7 +1854,9 @@ final class AppModel: ObservableObject {
                 // parent/root identity is what is pinned and it is created
                 // only after the operator presses Start.
                 let projected = DestinationFolderProjection.project(
-                    root: root, mirroredFolder: plan.mirroredFolder,
+                    root: root,
+                    mirroredFolder: DestinationFolderProjection.mirroredFolder(
+                        plan.mirroredFolder, for: root, exactRoots: plan.exactRoots),
                     organizationFolder: plan.organizationFolder)
                 guard projected == dest,
                       projected == root || projected.hasPrefix(root + "/") else {
@@ -1824,6 +1922,7 @@ final class AppModel: ObservableObject {
                           cardLabel: frozen.cardLabel,
                           mirroredFolder: frozen.mirroredFolder,
                           organizationFolder: frozen.organizationFolder,
+                          exactRoots: frozen.exactRoots,
                           enginePython: enginePython, engineRoot: engineRoot,
                           srcVolumeUUID: frozen.srcVolumeUUID,
                           rootVolumeUUIDs: frozen.rootVolumeUUIDs,
@@ -2299,6 +2398,7 @@ final class AppModel: ObservableObject {
         let cardLabel: String
         let mirroredFolder: String
         let organizationFolder: String
+        var exactRoots: [String] = []
         let enginePython: String // frozen: engineRoot changes must not retarget a queued job
         let engineRoot: String
         // Volume identity pins: a path string is not an identity — Card A can
@@ -2337,7 +2437,8 @@ final class AppModel: ObservableObject {
                           rootFileIDs: plan.rootFileIDs,
                           mirroredFolder: plan.mirroredFolder,
                           organizationFolder: plan.organizationFolder,
-                          cardLabel: plan.cardLabel)
+                          cardLabel: plan.cardLabel,
+                          exactRoots: plan.exactRoots.isEmpty ? nil : plan.exactRoots)
     }
 
     private func launchPlan(_ plan: JournalLaunchPlan) -> LaunchPlan {
@@ -2346,6 +2447,7 @@ final class AppModel: ObservableObject {
                    cardLabel: plan.cardLabel,
                    mirroredFolder: plan.mirroredFolder,
                    organizationFolder: plan.organizationFolder,
+                   exactRoots: plan.exactRoots ?? [],
                    enginePython: plan.enginePython, engineRoot: plan.engineRoot,
                    srcVolumeUUID: plan.sourceVolumeUUID,
                    rootVolumeUUIDs: plan.rootVolumeUUIDs,
@@ -3094,7 +3196,9 @@ final class AppModel: ObservableObject {
     /// template applied for display
     /// previews (the engine appends the card-name folder itself — the
     /// continuation key). {VolumeName} renders from the given source.
-    func effectiveDestinations(_ roots: [String], forSource src: String?) -> [String] {
+    func effectiveDestinations(_ roots: [String], forSource src: String?,
+                               extraRoots: [String]? = nil) -> [String] {
+        let extras = extraRoots ?? exactDestinationRoots
         let d = UserDefaults.standard
         let template = d.string(forKey: Pref.folderTemplate) ?? ""
         let project = d.string(forKey: Pref.projectName) ?? ""
@@ -3119,7 +3223,8 @@ final class AppModel: ObservableObject {
         return roots.map {
             DestinationFolderProjection.project(
                 root: $0,
-                mirroredFolder: destinationFolderRelativePath,
+                mirroredFolder: DestinationFolderProjection.mirroredFolder(
+                    destinationFolderRelativePath, for: $0, exactRoots: extras),
                 organizationFolder: sub)
         }
     }
@@ -3175,18 +3280,21 @@ final class AppModel: ObservableObject {
         // already exists as a SYMLINK can point anywhere — resolve and require
         // the real path to stay under the real root, and store the resolved
         // path so the eject interlock guards the volume actually written to.
+        let planExactRoots = exactDestinationRoots.filter { rawRoots.contains($0) }
         var dests: [String] = []
         for root in rawRoots {
+            let mirrored = DestinationFolderProjection.mirroredFolder(
+                destinationFolderRelativePath, for: root, exactRoots: planExactRoots)
             let rendered = DestinationFolderProjection.project(
                 root: root,
-                mirroredFolder: destinationFolderRelativePath,
+                mirroredFolder: mirrored,
                 organizationFolder: organizationFolder)
             let resolvedRoot = (root as NSString).resolvingSymlinksInPath
             let mirroredBase = DestinationFolderProjection.project(
                 root: root,
-                mirroredFolder: destinationFolderRelativePath,
+                mirroredFolder: mirrored,
                 organizationFolder: "")
-            if !destinationFolderRelativePath.isEmpty,
+            if !mirrored.isEmpty,
                FileManager.default.fileExists(atPath: mirroredBase),
                (mirroredBase as NSString).resolvingSymlinksInPath != mirroredBase {
                 return .failure(PlanError(message:
@@ -3209,6 +3317,13 @@ final class AppModel: ObservableObject {
             // in launch(), immediately before the engine runs, so a plan that
             // fails or waits in the queue leaves no artifacts behind.
             dests.append(resolved)
+        }
+        if LaunchPlanValidation.cardFoldersOverlap(
+            dests, cardLabel: cardLabel,
+            caseSensitive: rawRoots.map(LaunchPlanValidation.isCaseSensitive)) {
+            return .failure(PlanError(message:
+                "Two destinations on the same drive would put one card folder inside "
+                + "the other. Choose an extra folder outside the other destination."))
         }
 
         var args = ["-m", "dumptruck.cli", "offload", src] + dests
@@ -3234,6 +3349,7 @@ final class AppModel: ObservableObject {
                                    cardLabel: cardLabel,
                                    mirroredFolder: destinationFolderRelativePath,
                                    organizationFolder: organizationFolder,
+                                   exactRoots: planExactRoots,
                                    enginePython: enginePython, engineRoot: engineRoot,
                                    srcVolumeUUID: Self.volumeUUID(src),
                                    rootVolumeUUIDs: rawRoots.map { Self.volumeUUID($0) },

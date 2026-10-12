@@ -463,6 +463,7 @@ final class BatchSourceStagingModel: ObservableObject {
 
         let d = UserDefaults.standard
         let mirrored = appModel.destinationFolderRelativePath
+        let exactRoots = appModel.exactDestinationRoots.filter { roots.contains($0) }
         let template = d.string(forKey: Pref.folderTemplate) ?? ""
         let project = d.string(forKey: Pref.projectName) ?? ""
         let laneBase: BatchSourceStagingCore.LaneBase = { root, label, inspection, sourcePath in
@@ -471,7 +472,8 @@ final class BatchSourceStagingModel: ObservableObject {
                 volumeName: URL(fileURLWithPath: sourcePath).lastPathComponent,
                 cameraFormat: inspection.metadata.customProperties["format_name"] ?? "",
                 reel: inspection.metadata.customProperties["reel_name"] ?? "",
-                mirroredFolder: mirrored, template: template, project: project)
+                mirroredFolder: mirrored, exactRoots: exactRoots,
+                template: template, project: project)
         }
         inspectionTask = Task { [weak self] in
             do {
@@ -633,9 +635,13 @@ final class BatchSourceStagingModel: ObservableObject {
     /// preview used to show root/label and hid the organization folders
     /// (Codex desktop QA round 2, 2026-09-15, R2-03). {Date} renders for
     /// now and {JobID} for a placeholder; queueBatch renders the real ones.
+    /// `exactRoots` are extra folders on a drive that is already a
+    /// destination: they take no mirrored folder, exactly as buildPlan
+    /// projects them, so batch collision checks look where launch writes.
     static func laneBase(root: String, label: String, volumeName: String,
                          cameraFormat: String, reel: String,
-                         mirroredFolder: String, template: String, project: String,
+                         mirroredFolder: String, exactRoots: [String] = [],
+                         template: String, project: String,
                          date: Date = Date()) -> String {
         let context = TemplateContext(
             project: project, volumeName: volumeName, cardLabel: label, date: date,
@@ -643,7 +649,10 @@ final class BatchSourceStagingModel: ObservableObject {
             reel: reel, jobID: "PREVIEW")
         let organization = TemplateRenderer.render(template, context: context)
         return DestinationFolderProjection.project(
-            root: root, mirroredFolder: mirroredFolder, organizationFolder: organization)
+            root: root,
+            mirroredFolder: DestinationFolderProjection.mirroredFolder(
+                mirroredFolder, for: root, exactRoots: exactRoots),
+            organizationFolder: organization)
     }
 
     private func projectedLane(root: String, label: String,
@@ -654,6 +663,7 @@ final class BatchSourceStagingModel: ObservableObject {
             cameraFormat: candidate.inspection?.formatName ?? "",
             reel: candidate.inspection?.reelName ?? "",
             mirroredFolder: appModel.destinationFolderRelativePath,
+            exactRoots: appModel.exactDestinationRoots,
             template: d.string(forKey: Pref.folderTemplate) ?? "",
             project: d.string(forKey: Pref.projectName) ?? "")
         return BatchDestinationLanePath.make(destinationRoot: base, label: label)

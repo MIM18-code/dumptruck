@@ -92,6 +92,10 @@ struct JournalLaunchPlan: Codable, Hashable {
     let mirroredFolder: String
     let organizationFolder: String
     let cardLabel: String
+    /// Extra folders on a drive that is already a destination. They are used
+    /// as picked: the shared mirrored folder is not applied below them.
+    /// nil in every record written before this existed.
+    var exactRoots: [String]? = nil
 }
 
 /// One destination-folder choice, projected onto every selected destination
@@ -115,6 +119,13 @@ enum DestinationFolderProjection {
     /// Destination ordering is intentional and matches the UI preview:
     /// anchor / mirrored folder / organization template. The engine appends
     /// the card-name continuation folder after this base.
+    /// The mirrored folder that applies below `root`: none for an extra
+    /// folder, which is already the exact place the operator picked.
+    static func mirroredFolder(_ mirrored: String, for root: String,
+                               exactRoots: [String]?) -> String {
+        (exactRoots ?? []).contains(root) ? "" : mirrored
+    }
+
     static func project(root: String, mirroredFolder: String,
                         organizationFolder: String) -> String {
         [mirroredFolder, organizationFolder]
