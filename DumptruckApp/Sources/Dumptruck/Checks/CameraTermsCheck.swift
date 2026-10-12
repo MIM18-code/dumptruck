@@ -14,9 +14,8 @@ static func run() throws {
     defer { try? fm.removeItem(at: root) }
     try fm.createDirectory(at: root.appendingPathComponent("tools"), withIntermediateDirectories: true)
     try fm.createDirectory(at: root.appendingPathComponent("legal"), withIntermediateDirectories: true)
-    let suite = "camera-terms-check-\(UUID().uuidString)"
-    let defaults = UserDefaults(suiteName: suite)!
-    defer { defaults.removePersistentDomain(forName: suite) }
+    let (defaults, suite) = scratchDefaults("camera-terms-check")
+    defer { discardScratchDefaults(defaults, suite: suite) }
     func status() -> CameraComponentTerms.Status {
         CameraComponentTerms.status(engineRoot: root.path, defaults: defaults, bundleResources: nil)
     }

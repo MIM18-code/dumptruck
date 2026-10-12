@@ -584,8 +584,7 @@ require(FileManager.default.createFile(atPath: resolverCLI.path, contents: Data(
 require(FileManager.default.createFile(atPath: embeddedCLI.path, contents: Data()),
         "setup: could not create embedded engine marker")
 try! "  \(embeddedRoot.path)\n".write(to: embeddedFile, atomically: true, encoding: .utf8)
-let resolverSuite = "dumptruck-resolver-\(UUID().uuidString)"
-let resolverDefaults = UserDefaults(suiteName: resolverSuite)!
+let (resolverDefaults, resolverSuite) = scratchDefaults("dumptruck-resolver")
 require(EngineRootResolver.resolve(bundleURL: resolverBundle,
                                    defaults: resolverDefaults) == embeddedRoot.path,
         "valid embedded engine root did not outrank bundle walking")
@@ -647,7 +646,7 @@ require(EngineRootResolver.resolve(bundleURL: resolverBundle,
                                    defaults: resolverDefaults)
         == EngineRootResolver.fallbackRoot,
         "missing embedded and bundle-walk roots did not reach the legacy fallback")
-resolverDefaults.removePersistentDomain(forName: resolverSuite)
+discardScratchDefaults(resolverDefaults, suite: resolverSuite)
 try? FileManager.default.removeItem(at: resolverRoot)
 try? FileManager.default.removeItem(at: embeddedRoot)
 
