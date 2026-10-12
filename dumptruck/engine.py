@@ -1017,6 +1017,14 @@ def _seal_manifests(result, card_roots, root_fds, root_pins, ev):
                 ev({"event": "source_warning", "message": w})
 
 
+def _dest_is_case_sensitive(path):
+    """True only when the filesystem holding `path` is probed case-sensitive."""
+    try:
+        return os.pathconf(path, 11) == 1  # _PC_CASE_SENSITIVE (macOS)
+    except (OSError, ValueError):
+        return False  # unknown filesystem behavior = assume it collapses
+
+
 def offload(
     source_root,
     dest_roots,
@@ -1047,6 +1055,30 @@ def offload(
             seen_real.add(rp)
             deduped.append(rp)
     dest_roots = deduped
+    # Two destinations on one drive are allowed (the app's extra-folder
+    # option), but one card folder inside another would make the outer copy
+    # absorb the inner one's files. Refuse before anything is created.
+    card_folders = [os.path.join(d, label) for d in dest_roots]
+    # Unicode aliases are always one name (APFS and HFS+ are normalization-
+    # insensitive). Case aliases are one name unless BOTH folders of a pair
+    # sit on volumes probed case-sensitive, where Shoot and shoot are
+    # distinct folders that main always accepted. The decision is per pair:
+    # an unrelated case-insensitive destination must not fold names on a
+    # case-sensitive one. Unknown or missing roots fold (fail closed).
+    case_sensitive = [_dest_is_case_sensitive(d) for d in dest_roots]
+    nfc_keys = [unicodedata.normalize("NFC", p) for p in card_folders]
+    folded_keys = [k.casefold() for k in nfc_keys]
+    for i in range(len(card_folders)):
+        for j in range(i + 1, len(card_folders)):
+            keys = nfc_keys if case_sensitive[i] and case_sensitive[j] else folded_keys
+            a, b = keys[i], keys[j]
+            # Equal keys are one folder spelled two ways (X9/Shoot and
+            # X9/shoot): realpath dedupe above compares exact spellings.
+            if a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep):
+                raise RuntimeError(
+                    f"destinations nest one card folder inside another "
+                    f"({card_folders[i]} and {card_folders[j]}) — "
+                    "choose folders that sit side by side. Refused.")
     # Destination roots must pre-exist: creating a vanished /Volumes/<name>
     # root would silently write the "backup" onto the boot disk.
     for d in dest_roots:
@@ -1105,12 +1137,7 @@ def offload(
     # Case-ONLY collisions are legal when every destination is genuinely
     # case-sensitive (probed, fail-closed); normalization collisions are
     # always refused (even case-sensitive APFS is normalization-insensitive).
-    def _dest_case_sensitive(path):
-        try:
-            return os.pathconf(path, 11) == 1  # _PC_CASE_SENSITIVE (macOS)
-        except (OSError, ValueError):
-            return False  # unknown filesystem behavior = assume it collapses
-    all_dests_case_sensitive = all(_dest_case_sensitive(d) for d in dest_roots)
+    all_dests_case_sensitive = all(_dest_is_case_sensitive(d) for d in dest_roots)
     seen_names: dict = {}
     for e in entries:
         nfc = unicodedata.normalize("NFC", e.rel_path)

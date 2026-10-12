@@ -242,6 +242,8 @@ struct DestinationCard: View {
         model.volumes.first { pathIsAtOrInside(path, root: $0.path) }
     }
 
+    private var isExtraFolder: Bool { model.isExtraDestinationFolder(path) }
+
     private var templatePreflight: TemplateRenderer.PreflightReport {
         let d = UserDefaults.standard
         let template = d.string(forKey: Pref.folderTemplate) ?? ""
@@ -344,7 +346,7 @@ struct DestinationCard: View {
                         .foregroundStyle(Semantics.warningText)
                         .help("Participating in a transfer — do not remove")
                 }
-                if let vol = volume {
+                if let vol = volume, !isExtraFolder {
                     Button {
                         model.chooseDestinationFolder(on: vol.path)
                     } label: {
@@ -383,7 +385,13 @@ struct DestinationCard: View {
             if !templatePreflight.template.isEmpty {
                 preflightBadge(templatePreflight)
             }
-            if sharesDriveWithAnother {
+            if isExtraFolder, let vol = volume {
+                // Picked on purpose from the drive's menu: a quiet note, not
+                // a warning, and never a claim of a second copy.
+                Text("Extra folder on \(vol.name) · same drive, not a separate copy")
+                    .font(Typo.safety)
+                    .foregroundStyle(.tertiary)
+            } else if sharesDriveWithAnother {
                 Label("same drive as another destination", systemImage: "link")
                     .font(Typo.safety)
                     .foregroundStyle(Semantics.warningText)
@@ -397,9 +405,14 @@ struct DestinationCard: View {
             model.ejectingVolumePaths.contains($0.path)
         } ?? false)
         .contextMenu {
-            if let vol = volume {
+            if let vol = volume, !isExtraFolder {
                 Button("Choose Mirrored Folder Inside \(vol.name)…") {
                     model.chooseDestinationFolder(on: vol.path)
+                }
+                if path == vol.path {
+                    Button("Also Copy to Another Folder on This Drive…") {
+                        model.chooseExtraDestinationFolder(onDrive: vol.path)
+                    }
                 }
             }
             Button("Reveal in Finder") {

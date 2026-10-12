@@ -921,6 +921,150 @@ def scenario_final_verify_topology():
             os.environ["DUMPTRUCK_VERIFY_PER_FILE"] = saved
 
 
+def scenario_nested_destination_card_folders(base):
+    """Two destinations on one drive may sit side by side; a card folder
+    nested inside another destination's card folder is refused up front."""
+    from dumptruck import engine
+    print("[92] destinations on one drive: side by side ok, nested card folders refused")
+    src = os.path.join(base, "CARD92")
+    make_card(src, {"A.mov": 4096})
+    drive = os.path.join(base, "D92")
+    side_a, side_b = os.path.join(drive, "one"), os.path.join(drive, "two")
+    os.makedirs(side_a), os.makedirs(side_b)
+    from unittest.mock import patch
+    with patch.object(engine.macio, "physical_stores", return_value=frozenset({"disk92"})):
+        res = engine.offload(src, [side_a, side_b], label="CARD92")
+    att = res.attestation()
+    check("two verified folders on one device never authorize wiping",
+          att["independently_verified_destinations"] == 2
+          and att["distinct_physical_devices"] == 1
+          and att["safe_to_wipe_source"] is False, str(att))
+    check("two side-by-side folders on one drive both verify",
+          res.fully_verified and all(
+              os.path.isfile(os.path.join(d, "CARD92", "A.mov")) for d in (side_a, side_b)),
+          str(res.errors)[:300])
+    outer = os.path.join(drive, "outer")
+    inner = os.path.join(outer, "CARD92")
+    os.makedirs(inner)
+    try:
+        engine.offload(src, [outer, inner], label="CARD92", source_reread=False)
+        refused, message = False, ""
+    except RuntimeError as e:
+        refused, message = True, str(e)
+    check("a destination inside another destination's card folder is refused",
+          refused and "nest one card folder inside another" in message, message)
+    check("the refusal created no card folder", os.listdir(inner) == [], str(os.listdir(inner)))
+
+    # APFS/HFS+ can resolve a different spelling to the same card folder.
+    # Refuse aliases before creating a card directory or taking a job lock.
+    for kind, card_label, folder_name in (
+        ("case", "CARD92", "card92"),
+        ("unicode", "CAFÉ92", "CAFE\u030192"),
+    ):
+        alias_outer = os.path.join(drive, kind)
+        alias_inner = os.path.join(alias_outer, folder_name)
+        os.makedirs(alias_inner)
+        try:
+            engine.offload(src, [alias_outer, alias_inner], label=card_label,
+                           source_reread=False)
+            refused = False
+        except RuntimeError as e:
+            refused = "nest one card folder inside another" in str(e)
+        check(f"{kind}-aliased nested card folders are refused", refused)
+        check(f"{kind}-alias refusal writes nothing", os.listdir(alias_inner) == [],
+              str(os.listdir(alias_inner)))
+
+    # Two roots that are one folder spelled two ways would put both lanes in
+    # the same card folder; realpath keeps both spellings, so the guard must.
+    same = os.path.join(drive, "Shoot")
+    os.makedirs(same)
+    other_spelling = os.path.join(drive, "shoot")
+    if os.path.isdir(other_spelling):  # case-insensitive volume (the macOS default)
+        try:
+            engine.offload(src, [same, other_spelling], label="CARD92", source_reread=False)
+            refused = False
+        except RuntimeError as e:
+            refused = "nest one card folder inside another" in str(e)
+        check("one folder spelled two ways is refused as two destinations", refused)
+        check("that refusal writes nothing", os.listdir(same) == [], str(os.listdir(same)))
+    else:
+        print("  NOTE  case-sensitive volume: same-folder spelling case not applicable")
+
+
+def scenario_case_sensitive_destinations(base):
+    """On a case-sensitive volume, Shoot and shoot are two real folders.
+    Main accepted them as two destinations; the alias guard must too (Sol
+    regression review, 2026-10-12). Unicode aliases stay refused there."""
+    from dumptruck import engine
+    print("[93] case-sensitive volume: case-distinct folders stay distinct")
+    if os.environ.get("DUMPTRUCK_TEST_SKIP_DISK_IMAGE") == "1":
+        print("  NOTE  case-sensitive volume skipped by test environment")
+        return
+    hdiutil = shutil.which("hdiutil")
+    if not hdiutil:
+        print("  NOTE  case-sensitive volume skipped (hdiutil unavailable)")
+        return
+    import plistlib
+    image = os.path.join(base, "cs93.sparseimage")
+    mountpoint = os.path.join(base, "cs93-mount")
+    os.mkdir(mountpoint)
+    attach_attempted = False
+    try:
+        subprocess.run([hdiutil, "create", "-size", "1g", "-type", "SPARSE",
+                        "-fs", "Case-sensitive APFS", "-volname", f"DT93_{os.getpid()}",
+                        "-quiet", image],
+                       capture_output=True, text=True, timeout=60, check=True)
+        attach_attempted = True
+        subprocess.run([hdiutil, "attach", "-nobrowse", "-mountpoint", mountpoint, image],
+                       capture_output=True, text=True, timeout=60, check=True)
+        check("probe reports the image case-sensitive",
+              engine._dest_is_case_sensitive(mountpoint))
+        src = os.path.join(base, "CARD93")
+        make_card(src, {"A.mov": 4096})
+        upper, lower = os.path.join(mountpoint, "Shoot"), os.path.join(mountpoint, "shoot")
+        os.makedirs(upper), os.makedirs(lower)
+        res = engine.offload(src, [upper, lower], label="CARD93", source_reread=False)
+        check("case-distinct folders on a case-sensitive volume both verify",
+              res.fully_verified and all(
+                  os.path.isfile(os.path.join(d, "CARD93", "A.mov")) for d in (upper, lower)),
+              str(res.errors)[:300])
+        # Per pair: a third destination on the (case-insensitive) scratch
+        # volume must not fold the names on the case-sensitive image.
+        ci_dest = os.path.join(base, "CI93")
+        os.makedirs(ci_dest)
+        upper2, lower2 = os.path.join(mountpoint, "Take2"), os.path.join(mountpoint, "take2")
+        os.makedirs(upper2), os.makedirs(lower2)
+        res2 = engine.offload(src, [upper2, lower2, ci_dest], label="CARD93",
+                              source_reread=False)
+        check("an unrelated case-insensitive destination leaves them distinct",
+              res2.fully_verified and all(
+                  os.path.isfile(os.path.join(d, "CARD93", "A.mov"))
+                  for d in (upper2, lower2, ci_dest)),
+              str(res2.errors)[:300])
+        outer = os.path.join(mountpoint, "outer")
+        alias_inner = os.path.join(outer, "CAFE\u030193")
+        os.makedirs(alias_inner)
+        try:
+            engine.offload(src, [outer, alias_inner], label="CAF\u00c993",
+                           source_reread=False)
+            refused = False
+        except RuntimeError as e:
+            refused = "nest one card folder inside another" in str(e)
+        check("a Unicode alias still nests on a case-sensitive volume", refused)
+    finally:
+        if attach_attempted:
+            info = subprocess.run([hdiutil, "info", "-plist"], capture_output=True,
+                                  check=True, timeout=30)
+            for mounted in plistlib.loads(info.stdout).get("images", []):
+                if os.path.realpath(mounted.get("image-path", "")) != os.path.realpath(image):
+                    continue
+                devices = [e["dev-entry"] for e in mounted.get("system-entities", [])
+                           if e.get("dev-entry")]
+                if devices:
+                    subprocess.run([hdiutil, "detach", devices[0], "-force"],
+                                   capture_output=True, text=True, timeout=60, check=True)
+
+
 def main():
     # realpath: the engine pins destinations to REAL paths (macOS /var -> /private/var)
     base = os.path.realpath(tempfile.mkdtemp(prefix="dumptruck-adversarial-"))
@@ -3239,6 +3383,8 @@ except OSError:
     scenario_verify_normalizes_unicode_names(base)
     scenario_report_limits_and_pdf_failure(base)
     scenario_arri_sdk_helper_preferred(base)
+    scenario_nested_destination_card_folders(base)
+    scenario_case_sensitive_destinations(base)
     scenario_source_reread_after_drain(base)
     scenario_verify_heartbeat(base)
     scenario_source_watcher_junk_matches_engine()

@@ -22,6 +22,7 @@ DumptruckApp/Sources/Dumptruck/Checks/DesktopQACheck.swift
 DumptruckApp/Sources/Dumptruck/Checks/DumptruckChecks.swift
 DumptruckApp/Sources/Dumptruck/Checks/EvidenceParserCheck.swift
 DumptruckApp/Sources/Dumptruck/Checks/ExistingVerificationCheck.swift
+DumptruckApp/Sources/Dumptruck/Checks/ExtraDestinationFolderCheck.swift
 DumptruckApp/Sources/Dumptruck/Checks/HistoryExportCheck.swift
 DumptruckApp/Sources/Dumptruck/Checks/IngestPresetCheck.swift
 DumptruckApp/Sources/Dumptruck/Checks/JobJournalCheck.swift
