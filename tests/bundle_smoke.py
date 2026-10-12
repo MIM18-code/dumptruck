@@ -33,6 +33,15 @@ try:
    assert 'runtime' in info.split('flags=')[1].split()[0],(path,'no hardened runtime')
    assert 'Timestamp=' in info,(path,'no secure timestamp')
   print('Developer ID, hardened runtime, timestamps, stapled ticket and Gatekeeper checks passed.')
+  # ARRI's runtime may ship publicly only after ARRI approves the Licensed
+  # Product (Partner Program section 3.3). Before that, only the build marked
+  # for ARRI's review may carry it.
+  arri=[p for p in (engine/'tools').rglob('*') if 'arri' in p.name.lower()]
+  if arri and os.environ.get('DUMPTRUCK_ARRI_APPROVED')!='1':
+   assert 'TEST BUILD FOR ARRI REVIEW ONLY' in (mount/'Read Me.txt').read_text(),('ARRI runtime in a public build before approval',arri[:3])
+   print('ARRI runtime present: allowed only because this is the ARRI review build.')
+  else:
+   print('No ARRI runtime in this build.' if not arri else 'ARRI runtime present with DUMPTRUCK_ARRI_APPROVED=1.')
  records=json.loads((legal/'cameras/CAMERA_RUNTIME_SHA256.json').read_text())
  # Ad-hoc vendor files are re-signed with ours for notarization; every other vendor byte must match.
  resigned={'tools/vendor/arri/arriimagesdk_plugins/libjpegxs-lib.dylib'}

@@ -123,12 +123,11 @@ try FileManager.default.createDirectory(
 try FileManager.default.createDirectory(at: engineBundle, withIntermediateDirectories: true)
 require(FileManager.default.createFile(atPath: engineCLI.path, contents: Data()),
         "setup: could not create relocated engine marker")
-let engineSuite = "dumptruck-existing-root-\(UUID().uuidString)"
-let engineDefaults = UserDefaults(suiteName: engineSuite)!
+let (engineDefaults, engineSuite) = scratchDefaults("dumptruck-existing-root")
 require(ExistingVerificationModel.resolvedEngineRoot(
     bundleURL: engineBundle, defaults: engineDefaults) == engineRoot.path,
         "Verify Existing Offload bypassed bundle-walk engine resolution")
-engineDefaults.removePersistentDomain(forName: engineSuite)
+discardScratchDefaults(engineDefaults, suite: engineSuite)
 try FileManager.default.removeItem(at: engineRoot)
 
 print("ExistingVerificationCheck: PASS")

@@ -14,7 +14,7 @@ class Dumptruck < Formula
   local_archive = ENV.fetch("HOMEBREW_DUMPTRUCK_LOCAL_ARCHIVE", nil)
   if local_archive
     url "file://#{URI::DEFAULT_PARSER.escape(File.expand_path(local_archive))}"
-    version "0.5.6"
+    version "0.5.7"
     sha256 ENV.fetch("HOMEBREW_DUMPTRUCK_LOCAL_ARCHIVE_SHA256")
   else
     # HTTPS, not SSH: the reference install Mac (and most alpha testers)
@@ -78,7 +78,7 @@ class Dumptruck < Formula
   end
 
   test do
-    assert_match "dumptruck 0.5.6 (protocol 3)", shell_output("#{bin}/dumptruck --version")
+    assert_match "dumptruck 0.5.7 (protocol 3)", shell_output("#{bin}/dumptruck --version")
     assert_equal libexec.to_s,
                  (prefix/"Dumptruck.app/Contents/Resources/engine_root.txt").read.strip
   end
