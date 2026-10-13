@@ -100,6 +100,17 @@ func volumeRelativePath(_ p: String) -> String {
     p.hasPrefix("/Volumes/") ? String(p.dropFirst("/Volumes/".count)) : p
 }
 
+/// True when both paths sit under the same /Volumes/<name> mount, judged by
+/// spelling alone (an ejected drive can no longer be asked).
+func onSameMountedVolume(_ a: String, _ b: String) -> Bool {
+    func volume(_ p: String) -> Substring? {
+        guard p.hasPrefix("/Volumes/") else { return nil }
+        return p.dropFirst("/Volumes/".count).split(separator: "/").first
+    }
+    guard let va = volume(a), let vb = volume(b) else { return false }
+    return va == vb
+}
+
 /// Display name for a lane terminus / rail row: the volume name for mounted
 /// volumes, the last path component for folder endpoints.
 func endpointName(_ path: String) -> String {

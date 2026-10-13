@@ -126,6 +126,15 @@ enum DestinationFolderProjection {
         (exactRoots ?? []).contains(root) ? "" : mirrored
     }
 
+    /// The Organize template folder that applies below `root`: none for an
+    /// extra folder either, so the card lands directly in the folder the
+    /// operator picked (Codex GUI review of 0.5.9: Extra/Raws/CARD instead
+    /// of Extra/CARD).
+    static func organizationFolder(_ organization: String, for root: String,
+                                   exactRoots: [String]?) -> String {
+        (exactRoots ?? []).contains(root) ? "" : organization
+    }
+
     static func project(root: String, mirroredFolder: String,
                         organizationFolder: String) -> String {
         [mirroredFolder, organizationFolder]
@@ -801,6 +810,18 @@ final class Job: ObservableObject, Identifiable {
     var fraction: Double {
         guard bytesTotal > 0 else { return 0 }
         return min(1.0, Double(displayedBytesDone) / Double(bytesTotal))
+    }
+
+    /// The running header's file line. Every finished file counts once,
+    /// whether copied and verified this run or already offloaded (a retry's
+    /// matching or trusted copies), and a retry says how many were reused
+    /// instead of mixing the two silently (Codex GUI review of 0.5.10). The
+    /// byte percentage beside it includes files still in flight, so it may
+    /// run slightly ahead of the finished-file count.
+    nonisolated static func copyFilesLine(copied: Int, alreadyOffloaded: Int, total: Int) -> String {
+        let done = copied + alreadyOffloaded
+        let line = "\(done) of \(total) \(total == 1 ? "file" : "files") done"
+        return alreadyOffloaded > 0 ? line + " · \(alreadyOffloaded) already offloaded" : line
     }
 
     var isRunning: Bool {

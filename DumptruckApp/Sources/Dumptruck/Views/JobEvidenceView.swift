@@ -94,7 +94,8 @@ struct JobEvidenceView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue)
+            VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
+                         authorityWithdrawn: job.destinationAuthorityWithdrawn != nil)
         }
     }
 

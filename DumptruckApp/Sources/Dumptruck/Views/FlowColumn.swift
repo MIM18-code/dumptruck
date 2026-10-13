@@ -375,7 +375,8 @@ struct ReceiptRow: View {
                             .foregroundStyle(Semantics.dangerText)
                             .help(later.line)
                     }
-                    VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue)
+                    VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
+                             authorityWithdrawn: job.destinationAuthorityWithdrawn != nil)
                 }
                 .contentShape(Rectangle())
             }
@@ -907,7 +908,8 @@ private struct JobMessagesView: View {
                     if let exportError { Text(exportError).foregroundStyle(Semantics.dangerText) }
                 }
             } label: {
-                Text("\(job.errorCount) errors · \(job.warningCount) warnings")
+                Text("\(job.errorCount) \(job.errorCount == 1 ? "error" : "errors") · "
+                     + "\(job.warningCount) \(job.warningCount == 1 ? "warning" : "warnings")")
                     .font(Typo.safety.monospacedDigit())
                     .foregroundStyle(job.errorCount > 0 ? Semantics.dangerText : Semantics.warningText)
             }
@@ -981,7 +983,8 @@ struct JobHeaderBand: View {
                     .font(.headline)
                     .lineLimit(1).truncationMode(.middle)
                 Spacer()
-                VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue)
+                VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
+                             authorityWithdrawn: job.destinationAuthorityWithdrawn != nil)
                     .layoutPriority(1)
             }
             if job.hasCustodyFailure {
@@ -1049,9 +1052,12 @@ struct JobHeaderBand: View {
             ProgressView(value: job.fraction)
                 .tint(Brand.amber)
             HStack(spacing: 10) {
-                Text("\(job.filesCopied + job.filesSkipped) / \(job.filesTotal) files")
-                    .contentTransition(.numericText())
-                    .animation(digitAnimation, value: job.filesCopied + job.filesSkipped)
+                // No rolling digits on any copy counter: at copy speed a
+                // roll never finishes, and screenshots caught "5_ / 129" and
+                // "4_%" mid-roll beside 57 verified files and 45% of bytes
+                // (Codex GUI review of 0.5.10).
+                Text(Job.copyFilesLine(copied: job.filesCopied, alreadyOffloaded: job.filesSkipped,
+                                       total: job.filesTotal))
                 Text("·")
                 // No rolling digits on the copy counter: the engine reports
                 // per 4 MiB chunk, hundreds of updates/sec on fast media —
@@ -1064,8 +1070,6 @@ struct JobHeaderBand: View {
                         .id(job.phase)
                 }
                 Text("\(Int(job.fraction * 100))%")
-                    .contentTransition(.numericText(value: job.fraction))
-                    .animation(digitAnimation, value: Int(job.fraction * 100))
             }
             .font(Typo.evidenceQuiet.monospacedDigit()).foregroundStyle(.secondary)
             speedometerRow
@@ -1345,13 +1349,13 @@ struct JobHeaderBand: View {
         if job.verdict == .safeToWipe, job.destinationAuthorityWithdrawn != nil {
             // Historical proof, no mascot: the copies it describes are no
             // longer where the verdict left them.
-            Label("Historical: \(job.physicalDevices) physical devices · source read twice · flushed to media",
+            Label("Historical: \(job.physicalDevices) physical \(job.physicalDevices == 1 ? "device" : "devices") · source read twice · flushed to media",
                   systemImage: "clock.arrow.circlepath")
                 .font(Typo.safetyBody)
                 .foregroundStyle(.secondary)
         } else if job.verdict == .safeToWipe {
             HStack(alignment: .center, spacing: 8) {
-                Label("\(job.physicalDevices) physical devices · source read twice · flushed to media",
+                Label("\(job.physicalDevices) physical \(job.physicalDevices == 1 ? "device" : "devices") · source read twice · flushed to media",
                       systemImage: "checkmark.circle")
                     .font(Typo.safetyBody)
                     .foregroundStyle(Semantics.successText)
@@ -1543,9 +1547,14 @@ struct DestinationLane: View {
         return pathIsAtOrInsideLexically(withdrawnRoot, root: root)
             || pathIsAtOrInsideLexically(root, root: withdrawnRoot)
     }
-    /// That lane's drive was ejected rather than its copy changed.
+    /// That lane's drive was ejected rather than its copy changed. Every lane
+    /// on the ejected drive counts, including an extra folder beside the one
+    /// lane the withdrawal named (Codex GUI review of 0.5.9: the extra lane
+    /// stayed green after its drive was ejected).
     private var ejectedHere: Bool {
-        authorityWithdrawnHere && job.destinationAuthorityWithdrawnByEjection
+        guard job.destinationAuthorityWithdrawnByEjection,
+              let withdrawnRoot = job.destinationAuthorityWithdrawnRoot else { return false }
+        return authorityWithdrawnHere || onSameMountedVolume(root, withdrawnRoot)
     }
 
     private var fraction: Double {
@@ -1675,35 +1684,45 @@ struct DestinationLane: View {
 
     private var laneDisplayName: String {
         if root.hasPrefix("/Volumes/") {
-            guard let volume = model.volumes.first(where: {
+            // An ejected drive is gone from `volumes`, but its lanes still
+            // need telling apart (Mirror vs Extra): fall back to the mount
+            // folder spelled in the path (Codex GUI review of 0.5.10).
+            if let volume = model.volumes.first(where: {
                 pathIsAtOrInside(root, root: $0.path)
-            }) else { return endpointName(root) }
-            let rootsOnVolume = job.laneRoots.filter {
-                pathIsAtOrInside($0, root: volume.path)
+            }) {
+                return Self.laneDisplayName(root: root, laneRoots: job.laneRoots,
+                                            volumePath: volume.path, volumeName: volume.name)
             }
-            guard rootsOnVolume.count > 1 else { return volume.name }
-            // Two folder endpoints on one physical drive otherwise render as
-            // indistinguishable duplicate lanes. Find the first component
-            // that differs among the collocated roots (not merely the first
-            // component below the volume: several endpoints may share a
-            // project parent) and show that operator-chosen branch.
-            let prefix = volume.path + "/"
-            func components(_ path: String) -> [Substring] {
-                guard path.hasPrefix(prefix) else { return [] }
-                return path.dropFirst(prefix.count).split(separator: "/")
-            }
-            let mine = components(root)
-            let peers = rootsOnVolume.map(components)
-            guard !mine.isEmpty else {
-                return volume.name
-            }
-            let differingIndex = mine.indices.first { index in
-                Set(peers.map { index < $0.count ? String($0[index]) : "" }).count > 1
-            }
-            let branch = mine[differingIndex ?? (mine.count - 1)]
-            return "\(volume.name)/\(branch)"
+            let name = endpointName(root)
+            return Self.laneDisplayName(root: root, laneRoots: job.laneRoots,
+                                        volumePath: "/Volumes/" + name, volumeName: name)
         }
         return ((root as NSString).deletingLastPathComponent as NSString).lastPathComponent
+    }
+
+    /// Two folder endpoints on one physical drive otherwise render as
+    /// indistinguishable duplicate lanes. Find the first component that
+    /// differs among the collocated roots (not merely the first component
+    /// below the volume: several endpoints may share a project parent) and
+    /// show that operator-chosen branch. Lexical only, so it works after the
+    /// drive is ejected.
+    nonisolated static func laneDisplayName(root: String, laneRoots: [String],
+                                            volumePath: String, volumeName: String) -> String {
+        let prefix = volumePath + "/"
+        let rootsOnVolume = laneRoots.filter { $0 == volumePath || $0.hasPrefix(prefix) }
+        guard rootsOnVolume.count > 1 else { return volumeName }
+        func components(_ path: String) -> [Substring] {
+            guard path.hasPrefix(prefix) else { return [] }
+            return path.dropFirst(prefix.count).split(separator: "/")
+        }
+        let mine = components(root)
+        let peers = rootsOnVolume.map(components)
+        guard !mine.isEmpty else { return volumeName }
+        let differingIndex = mine.indices.first { index in
+            Set(peers.map { index < $0.count ? String($0[index]) : "" }).count > 1
+        }
+        let branch = mine[differingIndex ?? (mine.count - 1)]
+        return "\(volumeName)/\(branch)"
     }
 
     private var terminusSymbol: String {

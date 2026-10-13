@@ -1682,6 +1682,13 @@ final class AppModel: ObservableObject {
             lastSetupError = "That folder uses a symlink — choose the real folder on the drive"
             return false
         }
+        // "On this drive" means the same filesystem: a different volume
+        // mounted inside the drive's folder tree is another drive.
+        guard let anchorDevice = Self.deviceNumber(anchor),
+              Self.deviceNumber(path) == anchorDevice else {
+            lastSetupError = "That folder is on a different drive — choose a folder on \(endpointDisplayName(anchor))"
+            return false
+        }
         if let reason = assignmentBlockedReason(path, as: .destination) {
             lastSetupError = reason
             return false
@@ -1853,13 +1860,10 @@ final class AppModel: ObservableObject {
                 // The rendered peer folder may legitimately be absent. Its
                 // parent/root identity is what is pinned and it is created
                 // only after the operator presses Start.
-                let projected = DestinationFolderProjection.project(
-                    root: root,
-                    mirroredFolder: DestinationFolderProjection.mirroredFolder(
-                        plan.mirroredFolder, for: root, exactRoots: plan.exactRoots),
-                    organizationFolder: plan.organizationFolder)
-                guard projected == dest,
-                      projected == root || projected.hasPrefix(root + "/") else {
+                let allowed = LaunchPlanValidation.projectedDestinations(
+                    journalPlan(plan), root: root)
+                guard allowed.contains(dest),
+                      dest == root || dest.hasPrefix(root + "/") else {
                     lastSetupError = "The saved rendered destination escapes its drive — retry refused"
                     return false
                 }
@@ -2410,6 +2414,11 @@ final class AppModel: ObservableObject {
         let rootVolumeUUIDs: [String?]
         let srcFileID: String?
         let rootFileIDs: [String?]
+    }
+
+    /// st_dev of a path: which mounted filesystem it lives on.
+    static func deviceNumber(_ path: String) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.systemNumber] as? Int
     }
 
     static func volumeUUID(_ path: String) -> String? {
@@ -3196,6 +3205,21 @@ final class AppModel: ObservableObject {
     /// template applied for display
     /// previews (the engine appends the card-name folder itself — the
     /// continuation key). {VolumeName} renders from the given source.
+    /// Extra folders that take no Organize template. A staged retry of a
+    /// 0.5.9 record keeps the layout it was frozen with (the template below
+    /// the extra folder) so its preview and Start write where the saved
+    /// plan does (Astra review of 07dc275).
+    func organizationExemptRoots(_ extras: [String]) -> [String] {
+        guard let staged = stagedRetryPlan else { return extras }
+        return extras.filter { root in
+            guard let i = staged.rawRoots.firstIndex(of: root), i < staged.dests.count else {
+                return true
+            }
+            let saved = staged.dests[i]
+            return saved == root || saved == (root as NSString).resolvingSymlinksInPath
+        }
+    }
+
     func effectiveDestinations(_ roots: [String], forSource src: String?,
                                extraRoots: [String]? = nil) -> [String] {
         let extras = extraRoots ?? exactDestinationRoots
@@ -3225,7 +3249,8 @@ final class AppModel: ObservableObject {
                 root: $0,
                 mirroredFolder: DestinationFolderProjection.mirroredFolder(
                     destinationFolderRelativePath, for: $0, exactRoots: extras),
-                organizationFolder: sub)
+                organizationFolder: DestinationFolderProjection.organizationFolder(
+                    sub, for: $0, exactRoots: organizationExemptRoots(extras)))
         }
     }
 
@@ -3288,7 +3313,13 @@ final class AppModel: ObservableObject {
             let rendered = DestinationFolderProjection.project(
                 root: root,
                 mirroredFolder: mirrored,
-                organizationFolder: organizationFolder)
+                // Only the staged retry itself (no explicit batch context)
+                // keeps a 0.5.9 layout; a batch card queued meanwhile is a
+                // fresh plan (Astra review of 588d97b).
+                organizationFolder: DestinationFolderProjection.organizationFolder(
+                    organizationFolder, for: root,
+                    exactRoots: context == nil
+                        ? organizationExemptRoots(planExactRoots) : planExactRoots))
             let resolvedRoot = (root as NSString).resolvingSymlinksInPath
             let mirroredBase = DestinationFolderProjection.project(
                 root: root,

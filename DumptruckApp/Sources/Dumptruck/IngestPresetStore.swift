@@ -37,6 +37,15 @@ struct IngestPreset: Codable, Identifiable, Equatable {
     var settings: IngestPresetSettings
     var createdAt: Date
     var updatedAt: Date
+    /// Extra folders on a drive that is already one of the anchors ("Also
+    /// Copy to Another Folder on This Drive…"), restored only when that
+    /// folder is present on a mounted drive. Optional so presets saved
+    /// before 0.5.10 decode unchanged (nil), and older apps ignore the key.
+    var extraFolders: [String]? = nil
+    /// Volume UUID of each extra folder's drive when it was saved. A drive
+    /// with the same name but a different UUID is another drive, so its
+    /// folder is skipped with a note instead of restored.
+    var extraFolderVolumeUUIDs: [String: String]? = nil
 }
 
 struct RememberedDestinations: Codable, Equatable {
@@ -114,6 +123,8 @@ final class IngestPresetStore: ObservableObject {
     func upsert(name rawName: String,
                 destinationAnchors rawAnchors: [String],
                 mirroredDestinationFolder rawMirrored: String,
+                extraFolders rawExtras: [String] = [],
+                extraFolderVolumeUUIDs rawUUIDs: [String: String] = [:],
                 settings: IngestPresetSettings,
                 confirmOverwrite: Bool = false) -> String? {
         guard let name = Self.normalizedName(rawName) else {
@@ -124,6 +135,9 @@ final class IngestPresetStore: ObservableObject {
         }
         guard let mirrored = Self.normalizedRelativeFolder(rawMirrored) else {
             return "The mirrored destination folder must be a safe relative folder path."
+        }
+        guard let extras = Self.normalizedExtraFolders(rawExtras, anchors: anchors) else {
+            return "An extra destination folder must sit inside one of the preset's drives."
         }
         guard let error = Self.validateSettings(settings) else {
             let now = Date()
@@ -145,7 +159,9 @@ final class IngestPresetStore: ObservableObject {
                                       mirroredDestinationFolder: mirrored,
                                       settings: settings,
                                       createdAt: old.createdAt,
-                                      updatedAt: now)
+                                      updatedAt: now,
+                                      extraFolders: extras.isEmpty ? nil : extras,
+                                      extraFolderVolumeUUIDs: Self.extraUUIDs(rawUUIDs, extras: extras))
                 next.remove(at: existingIndex)
             } else {
                 guard next.count < Self.maxPresetCount else {
@@ -156,7 +172,9 @@ final class IngestPresetStore: ObservableObject {
                                       mirroredDestinationFolder: mirrored,
                                       settings: settings,
                                       createdAt: now,
-                                      updatedAt: now)
+                                      updatedAt: now,
+                                      extraFolders: extras.isEmpty ? nil : extras,
+                                      extraFolderVolumeUUIDs: Self.extraUUIDs(rawUUIDs, extras: extras))
             }
             next.insert(preset, at: 0)
             guard Self.validatePresets(next) == nil else {
@@ -255,6 +273,31 @@ final class IngestPresetStore: ObservableObject {
         return output
     }
 
+    /// Extra folders must be normalized absolute paths strictly inside one of
+    /// the anchors, unique, and never an anchor themselves.
+    nonisolated static func normalizedExtraFolders(_ raw: [String], anchors: [String]) -> [String]? {
+        guard raw.count <= 32 else { return nil }
+        var output: [String] = []
+        for path in raw {
+            guard path.count <= maxPathLength, path.hasPrefix("/"),
+                  !containsControlCharacter(path),
+                  URL(fileURLWithPath: path).standardizedFileURL.path == path,
+                  !anchors.contains(path),
+                  anchors.contains(where: { path.hasPrefix($0 == "/" ? "/" : $0 + "/") }),
+                  !output.contains(path) else { return nil }
+            output.append(path)
+        }
+        return output
+    }
+
+    /// The saved volume UUIDs, limited to folders the preset keeps.
+    nonisolated static func extraUUIDs(_ raw: [String: String],
+                                       extras: [String]) -> [String: String]? {
+        let kept = raw.filter { extras.contains($0.key) && !$0.value.isEmpty && $0.value.count <= 64
+            && !containsControlCharacter($0.value) }
+        return kept.isEmpty ? nil : kept
+    }
+
     /// Empty is the valid representation for “mirror the destination root”.
     nonisolated static func normalizedRelativeFolder(_ raw: String) -> String? {
         let path = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -312,8 +355,14 @@ final class IngestPresetStore: ObservableObject {
             let folded = name.folding(options: [.caseInsensitive, .diacriticInsensitive],
                                        locale: .current)
             guard names.insert(folded).inserted else { return "duplicate preset name" }
-            guard normalizedAnchors(preset.destinationAnchors) != nil,
+            guard let anchors = normalizedAnchors(preset.destinationAnchors),
                   normalizedRelativeFolder(preset.mirroredDestinationFolder) != nil,
+                  normalizedExtraFolders(preset.extraFolders ?? [], anchors: anchors)
+                    == (preset.extraFolders ?? []),
+                  (preset.extraFolderVolumeUUIDs ?? [:]).allSatisfy({ key, value in
+                      (preset.extraFolders ?? []).contains(key)
+                          && !value.isEmpty && value.count <= 64
+                          && !containsControlCharacter(value) }),
                   validateSettings(preset.settings) == nil else {
                 return "invalid preset values"
             }

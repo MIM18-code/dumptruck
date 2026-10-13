@@ -68,6 +68,10 @@ extension AppModel {
             name: name,
             destinationAnchors: anchors,
             mirroredDestinationFolder: destinationFolderRelativePath,
+            extraFolders: exactDestinationRoots.filter { destinationPaths.contains($0) },
+            extraFolderVolumeUUIDs: Dictionary(uniqueKeysWithValues:
+                exactDestinationRoots.filter { destinationPaths.contains($0) }
+                    .compactMap { extra in Self.volumeUUID(extra).map { (extra, $0) } }),
             settings: settings,
             confirmOverwrite: confirmOverwrite) {
             lastSetupError = error
@@ -145,10 +149,65 @@ extension AppModel {
             folderEndpoints.append(Endpoint(path: anchor, kind: .folder))
         }
         applyIngestPresetSettings(settings)
+        let skipped = restorePresetExtraFolders(preset.extraFolders ?? [],
+                                                anchors: preset.destinationAnchors,
+                                                volumeUUIDs: preset.extraFolderVolumeUUIDs ?? [:])
         rememberCurrentIngestDestinations()
-        lastSetupError = nil
+        // A skipped extra folder is a note, not a refusal: the preset applied.
+        lastSetupError = skipped.isEmpty ? nil
+            : "Preset \(preset.name) applied without "
+              + (skipped.count == 1 ? "an extra folder: " : "\(skipped.count) extra folders: ")
+              + skipped.joined(separator: "; ")
         objectWillChange.send()
         return nil
+    }
+
+    /// Re-adds each saved extra folder whose drive is mounted and whose
+    /// folder still exists, through the same checks as the drive menu (no
+    /// symlink, no nesting, inside its drive). Returns one line per folder
+    /// left out, naming why.
+    func restorePresetExtraFolders(_ extras: [String], anchors: [String],
+                                   volumeUUIDs: [String: String] = [:]) -> [String] {
+        var skipped: [String] = []
+        let mounted = (FileManager.default.mountedVolumeURLs(
+            includingResourceValuesForKeys: nil, options: []) ?? []).map(\.path)
+        for extra in extras {
+            let name = volumeRelativePath(extra)
+            guard let anchor = anchors.first(where: {
+                pathIsAtOrInsideLexically(extra, root: $0) && extra != $0 }) else {
+                skipped.append("\(name) (its drive is not in this preset)")
+                continue
+            }
+            if Self.destinationDriveIsGone(extra, mountedVolumePaths: mounted) {
+                skipped.append("\(name) (drive not mounted)")
+                continue
+            }
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: extra, isDirectory: &isDir),
+                  isDir.boolValue else {
+                skipped.append("\(name) (folder not found)")
+                continue
+            }
+            // No saved drive identity (some volumes report no UUID) means
+            // a same-named replacement drive cannot be ruled out: skip it
+            // with a note rather than restore it silently (Astra review of
+            // d7ef3bc).
+            guard let saved = volumeUUIDs[extra] else {
+                skipped.append("\(name) (Dumptruck could not record which drive it was on; "
+                               + "add it again from the drive's menu)")
+                continue
+            }
+            if Self.volumeUUID(extra) != saved {
+                skipped.append("\(name) (a different drive with the same name is mounted)")
+                continue
+            }
+            let previousError = lastSetupError
+            if !addExtraDestinationFolder(extra, onDrive: anchor) {
+                skipped.append("\(name) (\(lastSetupError ?? "refused"))")
+            }
+            lastSetupError = previousError
+        }
+        return skipped
     }
 
     @discardableResult

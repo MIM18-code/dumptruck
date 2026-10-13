@@ -109,7 +109,8 @@ struct ConnectedShelf: View {
                             .controlSize(.small)
                             .help("Eject every card whose offload is verified: "
                                   + dumped.map(\.name).joined(separator: ", "))
-                            .accessibilityLabel("Eject \(dumped.count) dumped cards")
+                            .accessibilityLabel(dumped.count == 1 ? "Eject dumped card"
+                                                : "Eject \(dumped.count) dumped cards")
                         }
                         Spacer()
                         if !selection.isEmpty {

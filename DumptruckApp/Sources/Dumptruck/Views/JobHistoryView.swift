@@ -543,7 +543,8 @@ private struct HistoryJobRow: View {
 
                 Spacer()
 
-                VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue)
+                VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
+                             authorityWithdrawn: job.destinationAuthorityWithdrawn != nil)
                     .layoutPriority(1)
             }
 
@@ -572,7 +573,7 @@ private struct HistoryJobRow: View {
                 if job.physicalDevices > 0 {
                     Text("·")
                         .foregroundStyle(.tertiary)
-                    Text("\(job.physicalDevices) physical devices")
+                    Text("\(job.physicalDevices) physical \(job.physicalDevices == 1 ? "device" : "devices")")
                         .font(Typo.evidenceQuiet)
                         .foregroundStyle(.secondary)
                 }
@@ -581,7 +582,9 @@ private struct HistoryJobRow: View {
             }
 
             if !job.wipeBlockers.isEmpty {
-                Label("\(HistoryExport.boundedBlockerCount(job.wipeBlockers)) wipe blockers recorded",
+                Label(HistoryExport.boundedBlockerCount(job.wipeBlockers) == 1
+                        ? "1 wipe blocker recorded"
+                        : "\(HistoryExport.boundedBlockerCount(job.wipeBlockers)) wipe blockers recorded",
                       systemImage: "info.circle")
                     .font(Typo.safety)
                     .foregroundStyle(Semantics.warningText)

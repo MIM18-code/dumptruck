@@ -84,7 +84,7 @@ struct DestinationsRail: View {
                                      : AnyShapeStyle(Semantics.warningText))
                     .help("Two destinations on separate physical devices are required before a card can be called safe to wipe. The engine resolves physical devices at Start; its attestation is what decides \(Job.Verdict.safeToWipe.displayLine).")
                 }
-                Text("Destinations")
+                Text(model.destinationPaths.count == 1 ? "Destination" : "Destinations")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Semantics.destinationText)
             }
@@ -142,7 +142,7 @@ struct DestinationsRail: View {
     private var railFooter: some View {
         HStack {
             if !model.destinationFolderRelativePath.isEmpty {
-                Button("Clear Mirrored Folder") {
+                Button("Clear Mirror") {
                     model.clearMirroredDestinationFolder()
                 }
                 .font(.caption)
@@ -153,9 +153,16 @@ struct DestinationsRail: View {
             Button {
                 model.chooseFolder(as: "dest")
             } label: {
-                Label("Choose Mirrored Folder…", systemImage: "folder.badge.plus")
-                    .font(.caption)
+                ViewThatFits(in: .horizontal) {
+                    Label("Mirrored Folder…", systemImage: "folder.badge.plus")
+                        .fixedSize()
+                    Label("Mirror…", systemImage: "folder.badge.plus")
+                        .fixedSize()
+                    Image(systemName: "folder.badge.plus")
+                }
+                .font(.caption)
             }
+            .accessibilityLabel("Choose Mirrored Folder")
             .buttonStyle(HoverHighlightButtonStyle())
             .help("Copy TO an existing folder instead of a drive root — the "
                   + "card folder is created inside it")
@@ -223,6 +230,7 @@ struct DestinationsRail: View {
                 .font(.caption)
         }
         .menuStyle(.borderlessButton).hoverHighlight()
+        .fixedSize()
         .help("Save, apply, delete, or restore destination presets")
         .accessibilityLabel("Destination presets")
     }
@@ -268,7 +276,7 @@ struct DestinationCard: View {
                 Label {
                     Text(report.summaryDescription)
                         .font(Typo.safety)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 } icon: {
                     Image(systemName: "exclamationmark.octagon.fill")
                 }
@@ -279,7 +287,7 @@ struct DestinationCard: View {
                 Label {
                     Text(report.summaryDescription)
                         .font(Typo.safety)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 } icon: {
                     Image(systemName: "exclamationmark.triangle.fill")
                 }
@@ -293,7 +301,7 @@ struct DestinationCard: View {
                 Label {
                     Text(report.summaryDescription)
                         .font(Typo.safety)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 } icon: {
                     Image(systemName: "exclamationmark.triangle.fill")
                 }
@@ -304,7 +312,7 @@ struct DestinationCard: View {
                 Label {
                     Text(report.summaryDescription)
                         .font(Typo.safety)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 } icon: {
                     Image(systemName: "questionmark.circle")
                 }
@@ -382,7 +390,9 @@ struct DestinationCard: View {
                     .lineLimit(1).truncationMode(.head)
                     .help("Mirrored destination folder + Organize template — the engine adds the card-name folder")
             }
-            if !templatePreflight.template.isEmpty {
+            // Extra folders take no Organize template, so its note does not
+            // apply to them (Codex GUI review of 0.5.10).
+            if !templatePreflight.template.isEmpty, !isExtraFolder {
                 preflightBadge(templatePreflight)
             }
             if isExtraFolder, let vol = volume {
