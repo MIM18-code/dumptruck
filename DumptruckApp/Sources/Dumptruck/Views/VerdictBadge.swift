@@ -6,6 +6,11 @@ import SwiftUI
 struct VerdictBadge: View {
     let verdict: Job.Verdict
     let phaseText: String   // running phases show their phase label
+    /// Wipe permission was withdrawn after the verdict (a drive ejected, a
+    /// copy changed). The headline still records what the run proved, but
+    /// it must not stay bright green beside "verify again before wiping"
+    /// (Codex GUI review of 0.5.9).
+    var authorityWithdrawn = false
 
     private struct ChipStyle {
         let ink: AnyShapeStyle
@@ -14,6 +19,11 @@ struct VerdictBadge: View {
     }
 
     private var style: ChipStyle {
+        if verdict == .safeToWipe, authorityWithdrawn {
+            return ChipStyle(ink: AnyShapeStyle(Semantics.warningText),
+                             background: AnyShapeStyle(Semantics.warning.opacity(Semantics.chip)),
+                             border: AnyShapeStyle(Semantics.warningText.opacity(0.45)))
+        }
         switch verdict {
         case .unverified, .failed:
             return ChipStyle(ink: AnyShapeStyle(Semantics.badgeInk),

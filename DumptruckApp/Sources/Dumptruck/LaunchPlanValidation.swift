@@ -46,16 +46,10 @@ enum LaunchPlanValidation {
             return false
         }
         for (root, destination) in zip(plan.rawRoots, plan.destinations) {
-            let projected = DestinationFolderProjection.project(
-                root: root,
-                mirroredFolder: DestinationFolderProjection.mirroredFolder(
-                    plan.mirroredFolder, for: root, exactRoots: plan.exactRoots),
-                organizationFolder: plan.organizationFolder)
             // The GUI passes the organization base; the engine appends the
             // card-label continuation folder exactly once. Accepting an
             // already-expanded path would append the label again on retry.
-            guard destination == URL(fileURLWithPath: projected)
-                    .standardizedFileURL.path,
+            guard projectedDestinations(plan, root: root).contains(destination),
                   destination == root || destination.hasPrefix(root + "/") else {
                 return false
             }
@@ -116,6 +110,24 @@ enum LaunchPlanValidation {
             return false
         }
         return URL(fileURLWithPath: value).standardizedFileURL.path == value
+    }
+
+    /// The destinations a saved plan may carry for `root`. An extra folder
+    /// takes neither the mirrored folder nor the Organize template; a 0.5.9
+    /// record applied the template below it, and stays valid so an old
+    /// journal entry never invalidates the journal or its retry.
+    static func projectedDestinations(_ plan: JournalLaunchPlan, root: String) -> [String] {
+        func standardized(_ organization: String) -> String {
+            URL(fileURLWithPath: DestinationFolderProjection.project(
+                root: root,
+                mirroredFolder: DestinationFolderProjection.mirroredFolder(
+                    plan.mirroredFolder, for: root, exactRoots: plan.exactRoots),
+                organizationFolder: organization)).standardizedFileURL.path
+        }
+        let current = standardized(DestinationFolderProjection.organizationFolder(
+            plan.organizationFolder, for: root, exactRoots: plan.exactRoots))
+        guard (plan.exactRoots ?? []).contains(root) else { return [current] }
+        return [current, standardized(plan.organizationFolder)]
     }
 
     private static func isSafeRelativePath(_ value: String) -> Bool {

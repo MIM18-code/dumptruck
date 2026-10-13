@@ -9,7 +9,7 @@ static func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 static func plan(rawRoots: [String], destinations: [String],
-                 exactRoots: [String]?) -> JournalLaunchPlan {
+                 exactRoots: [String]?, organizationFolder: String = "") -> JournalLaunchPlan {
     JournalLaunchPlan(
         src: "/Volumes/CARD", rawRoots: rawRoots, destinations: destinations,
         args: ["-m", "dumptruck.cli", "offload", "/Volumes/CARD"] + destinations
@@ -17,7 +17,7 @@ static func plan(rawRoots: [String], destinations: [String],
         enginePython: "/tmp/engine/.venv/bin/python", engineRoot: "/tmp/engine",
         sourceVolumeUUID: nil, rootVolumeUUIDs: rawRoots.map { _ in nil },
         sourceFileID: "1:2", rootFileIDs: rawRoots.map { _ in "3:4" },
-        mirroredFolder: "Shoot", organizationFolder: "",
+        mirroredFolder: "Shoot", organizationFolder: organizationFolder,
         cardLabel: "B001", exactRoots: exactRoots)
 }
 
@@ -129,6 +129,83 @@ static func run() throws {
             "the drive gets the mirrored folder, the extra folder is used as picked: \(rendered)")
     require(!model.addExtraDestinationFolder(second, onDrive: anchor),
             "the same extra folder cannot be added twice")
+    // Under a real Organize template the card still lands directly in the
+    // extra folder, while the drive takes mirrored folder + template.
+    let defaults = UserDefaults.standard
+    let savedTemplate = defaults.object(forKey: Pref.folderTemplate)
+    let savedProject = defaults.object(forKey: Pref.projectName)
+    defaults.set("{Project}/Raws", forKey: Pref.folderTemplate)
+    defaults.set("P", forKey: Pref.projectName)
+    let templated = model.effectiveDestinations(model.destinationPaths, forSource: nil)
+    defaults.set(savedTemplate, forKey: Pref.folderTemplate)
+    defaults.set(savedProject, forKey: Pref.projectName)
+    require(templated == [mirrored + "/P/Raws", second],
+            "the template applies under the drive, never under the extra folder: \(templated)")
+
+    // Presets remember extra folders and restore the ones that are present;
+    // a missing one is skipped with a reason, never a refusal.
+    let gone = anchor + "/Gone"
+    require(IngestPresetStore.normalizedExtraFolders([second], anchors: [anchor]) == [second],
+            "an extra folder inside a preset drive is valid")
+    require(IngestPresetStore.normalizedExtraFolders([anchor], anchors: [anchor]) == nil,
+            "a drive cannot be its own extra folder")
+    require(IngestPresetStore.normalizedExtraFolders(["/Volumes/Other/X"], anchors: [anchor]) == nil,
+            "an extra folder outside every preset drive is refused")
+    model.installPresetDestinationSelection(anchors: [anchor], mirroredFolder: "Shoot")
+    let noIdentity = model.restorePresetExtraFolders([second], anchors: [anchor])
+    require(model.destinationPaths == [anchor] && noIdentity.count == 1
+                && noIdentity[0].contains("could not record"),
+            "an extra folder saved without a drive identity is skipped with a note: \(noIdentity)")
+    let secondUUID = AppModel.volumeUUID(second) ?? "missing"
+    let skipped = model.restorePresetExtraFolders(
+        [second, gone], anchors: [anchor], volumeUUIDs: [second: secondUUID, gone: secondUUID])
+    require(model.destinationPaths == [anchor, second] && model.isExtraDestinationFolder(second),
+            "a present extra folder is restored as an extra folder: \(model.destinationPaths)")
+    require(skipped.count == 1 && skipped[0].contains("Gone") && skipped[0].contains("not found"),
+            "a missing extra folder is skipped with its reason: \(skipped)")
+    // A same-named drive with another volume UUID is another drive.
+    model.installPresetDestinationSelection(anchors: [anchor], mirroredFolder: "Shoot")
+    let wrongDrive = model.restorePresetExtraFolders(
+        [second], anchors: [anchor], volumeUUIDs: [second: "00000000-NOT-THIS-DRIVE"])
+    require(model.destinationPaths == [anchor] && wrongDrive.count == 1
+                && wrongDrive[0].contains("different drive"),
+            "an extra folder on a different same-named drive is skipped: \(wrongDrive)")
+    if let realUUID = AppModel.volumeUUID(second) {
+        let sameDrive = model.restorePresetExtraFolders(
+            [second], anchors: [anchor], volumeUUIDs: [second: realUUID])
+        require(sameDrive.isEmpty && model.isExtraDestinationFolder(second),
+                "the saved drive's own UUID restores the folder: \(sameDrive)")
+    }
+    require(AppModel.deviceNumber(second) != nil
+                && AppModel.deviceNumber(second) == AppModel.deviceNumber(anchor),
+            "a folder on the drive shares the drive's device number")
+    let presetJSON = """
+        {"id":"\(UUID().uuidString)","name":"Old","destinationAnchors":["\(anchor)"],
+         "mirroredDestinationFolder":"Shoot","createdAt":"2026-10-01T00:00:00Z",
+         "updatedAt":"2026-10-01T00:00:00Z","settings":{"folderTemplate":"","projectName":"",
+         "verifyMode":"full","sourceReread":true,"reverifyExisting":false,"extraHashes":"",
+         "makeReports":true,"thumbnails":true,"slateFirst":false,"openReportWhenDone":false,
+         "queueMode":"off"}}
+        """
+    let presetDecoder = JSONDecoder()
+    presetDecoder.dateDecodingStrategy = .iso8601
+    let oldPreset = try presetDecoder.decode(IngestPreset.self, from: Data(presetJSON.utf8))
+    require(oldPreset.extraFolders == nil && IngestPresetStore.validatePresets([oldPreset]) == nil,
+            "a preset saved before 0.5.10 decodes and validates with no extra folders")
+    var withExtra = oldPreset
+    withExtra.extraFolders = [second]
+    require(IngestPresetStore.validatePresets([withExtra]) == nil,
+            "a preset with a valid extra folder validates")
+    withExtra.extraFolderVolumeUUIDs = [second: "ABC"]
+    require(IngestPresetStore.validatePresets([withExtra]) == nil,
+            "a volume UUID for a kept extra folder validates")
+    withExtra.extraFolderVolumeUUIDs = [gone: "ABC"]
+    require(IngestPresetStore.validatePresets([withExtra]) != nil,
+            "a volume UUID for a folder the preset does not keep is refused")
+    withExtra.extraFolderVolumeUUIDs = nil
+    withExtra.extraFolders = [second, second]
+    require(IngestPresetStore.validatePresets([withExtra]) != nil,
+            "duplicate extra folders are refused")
     model.unassignDestination(anchor)
     require(model.destinationPaths.isEmpty && !model.isExtraDestinationFolder(second),
             "removing the drive removes its extra folders")
@@ -170,7 +247,62 @@ static func run() throws {
     require(BatchSourceStagingModel.laneBase(
                 root: extra, label: "B001", volumeName: "B001", cameraFormat: "?", reel: "",
                 mirroredFolder: "Shoot", exactRoots: [extra], template: "{Project}", project: "P")
-                == extra + "/P",
-            "the organization template still applies below an extra folder")
+                == extra,
+            "an extra folder takes no Organize template in batch lanes either")
+    require(BatchSourceStagingModel.laneBase(
+                root: drive, label: "B001", volumeName: "B001", cameraFormat: "?", reel: "",
+                mirroredFolder: "Shoot", exactRoots: [extra], template: "{Project}", project: "P")
+                == drive + "/Shoot/P",
+            "a drive anchor keeps mirrored folder and template")
+
+    // Saved plans: the card lands directly in the extra folder; a 0.5.9
+    // record that applied the template below it still validates.
+    require(LaunchPlanValidation.isStructurallySafe(
+        plan(rawRoots: [drive, extra], destinations: [drive + "/Shoot/Raws", extra],
+             exactRoots: [extra], organizationFolder: "Raws")),
+            "an extra folder with no template below it validates")
+    require(LaunchPlanValidation.isStructurallySafe(
+        plan(rawRoots: [drive, extra], destinations: [drive + "/Shoot/Raws", extra + "/Raws"],
+             exactRoots: [extra], organizationFolder: "Raws")),
+            "a 0.5.9 record with the template below the extra folder still validates")
+    require(!LaunchPlanValidation.isStructurallySafe(
+        plan(rawRoots: [drive, extra], destinations: [drive + "/Shoot", extra],
+             exactRoots: [extra], organizationFolder: "Raws")),
+            "an anchor must still carry the template")
+
+    // After an eject, every lane on that drive reads as ejected, the extra
+    // folder's included (Codex GUI review of 0.5.9).
+    require(onSameMountedVolume(drive + "/Shoot", extra),
+            "an extra folder shares its drive's volume")
+    require(!onSameMountedVolume("/Volumes/X9/Shoot", "/Volumes/X9B/Shoot"),
+            "a volume name that is a prefix of another is a different volume")
+    require(!onSameMountedVolume("/Users/me/Backups", "/Users/me/Other"),
+            "folders off /Volumes are never judged the same ejected drive")
+
+    // Lane labels tell a drive's Mirror and Extra lanes apart, mounted or
+    // ejected: the label is derived from the path alone.
+    let laneRoots = ["/Volumes/DT/Mirror/Raws/B001", "/Volumes/DT/Extra/B001",
+                     "/Volumes/OTHER/Mirror/Raws/B001"]
+    require(DestinationLane.laneDisplayName(root: laneRoots[0], laneRoots: laneRoots,
+                                            volumePath: "/Volumes/DT", volumeName: "DT")
+                == "DT/Mirror"
+            && DestinationLane.laneDisplayName(root: laneRoots[1], laneRoots: laneRoots,
+                                               volumePath: "/Volumes/DT", volumeName: "DT")
+                == "DT/Extra",
+            "two lanes on one drive are labeled by their branch")
+    require(DestinationLane.laneDisplayName(root: laneRoots[2], laneRoots: laneRoots,
+                                            volumePath: "/Volumes/OTHER", volumeName: "OTHER")
+                == "OTHER",
+            "a drive with one lane keeps its plain name")
+
+    // The running header counts every finished file once and names reuse.
+    require(Job.copyFilesLine(copied: 15, alreadyOffloaded: 42, total: 129)
+                == "57 of 129 files done · 42 already offloaded",
+            "a retry's file line counts reused files and says so")
+    require(Job.copyFilesLine(copied: 57, alreadyOffloaded: 0, total: 129) == "57 of 129 files done",
+            "a fresh copy's file line")
+    require(Job.copyFilesLine(copied: 0, alreadyOffloaded: 0, total: 1) == "0 of 1 file done",
+            "singular file line")
+
 }
 }

@@ -636,8 +636,9 @@ final class BatchSourceStagingModel: ObservableObject {
     /// (Codex desktop QA round 2, 2026-09-15, R2-03). {Date} renders for
     /// now and {JobID} for a placeholder; queueBatch renders the real ones.
     /// `exactRoots` are extra folders on a drive that is already a
-    /// destination: they take no mirrored folder, exactly as buildPlan
-    /// projects them, so batch collision checks look where launch writes.
+    /// destination: they take neither the mirrored folder nor the Organize
+    /// template, exactly as buildPlan projects them, so batch collision
+    /// checks look where launch writes.
     static func laneBase(root: String, label: String, volumeName: String,
                          cameraFormat: String, reel: String,
                          mirroredFolder: String, exactRoots: [String] = [],
@@ -652,7 +653,8 @@ final class BatchSourceStagingModel: ObservableObject {
             root: root,
             mirroredFolder: DestinationFolderProjection.mirroredFolder(
                 mirroredFolder, for: root, exactRoots: exactRoots),
-            organizationFolder: organization)
+            organizationFolder: DestinationFolderProjection.organizationFolder(
+                organization, for: root, exactRoots: exactRoots))
     }
 
     private func projectedLane(root: String, label: String,

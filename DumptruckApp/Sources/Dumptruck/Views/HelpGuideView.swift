@@ -256,7 +256,10 @@ struct HelpGuideView: View {
                     validates that the drives are actually mounted first. It \
                     never creates folders, starts a transfer, or grants a \
                     verdict. Manage them here; apply them from the Presets \
-                    menu under the destinations rail.
+                    menu under the destinations rail. Extra folders added \
+                    with "Also Copy to Another Folder on This Drive…" are \
+                    saved too and come back only when that folder is on a \
+                    mounted drive; a message names any that were skipped.
                     """)
 
                     section("Reports", """
