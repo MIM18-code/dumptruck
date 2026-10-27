@@ -477,6 +477,15 @@ struct MutationEventFilter: Sendable {
     /// unknown change set (forced). Paths outside `root` never match, so
     /// the filter fails closed on anything it cannot place.
     static func sourceJunk(root: String) -> MutationEventFilter {
+        // A selection set is a list written once at staging, and FSEvents
+        // delivers that write after the watcher arms (Terra GUI test,
+        // 2026-10-27). The picked bytes are on the drive, which the engine
+        // rescans. Forced events (root deleted, unmount) still fire.
+        if LooseSourceStaging.isSelectionSet(root) {
+            var all = MutationEventFilter { _ in true }
+            all.ignoresMetadataOnly = true
+            return all
+        }
         let roots = Set([root, (root as NSString).resolvingSymlinksInPath].map {
             $0.hasSuffix("/") ? String($0.dropLast()) : $0
         })

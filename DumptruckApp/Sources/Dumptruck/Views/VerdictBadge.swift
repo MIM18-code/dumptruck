@@ -25,9 +25,16 @@ struct VerdictBadge: View {
                              border: AnyShapeStyle(Semantics.warningText.opacity(0.45)))
         }
         switch verdict {
-        case .unverified, .failed:
+        case .failed:
             return ChipStyle(ink: AnyShapeStyle(Semantics.badgeInk),
                              background: AnyShapeStyle(Semantics.dangerText),
+                             border: AnyShapeStyle(Color.clear))
+        case .unverified:
+            // Copied clean but not read back (Fast mode, no source re-read).
+            // Red read as a failed job (Joshua, 2026-10-27); a failed file
+            // ends the job FAILED, so this is never one.
+            return ChipStyle(ink: AnyShapeStyle(Semantics.badgeInk),
+                             background: AnyShapeStyle(Semantics.warningText),
                              border: AnyShapeStyle(Color.clear))
         case .safeToWipe:
             return ChipStyle(ink: AnyShapeStyle(Semantics.badgeInk),

@@ -491,8 +491,10 @@ private struct HistoryJobRow: View {
         switch job.verdict {
         case .running:
             return AnyShapeStyle(Semantics.running.opacity(0.35))
-        case .failed, .unverified:
+        case .failed:
             return AnyShapeStyle(Semantics.danger.opacity(0.6))
+        case .unverified:
+            return AnyShapeStyle(Semantics.warning.opacity(0.6))
         case .safeToWipe, .verifiedKeepCard:
             return AnyShapeStyle(Color(nsColor: .separatorColor))
         }
@@ -502,8 +504,10 @@ private struct HistoryJobRow: View {
         switch job.verdict {
         case .running:
             return AnyShapeStyle(Semantics.running)
-        case .failed, .unverified:
+        case .failed:
             return AnyShapeStyle(Semantics.danger)
+        case .unverified:
+            return AnyShapeStyle(Semantics.warning)
         case .safeToWipe, .verifiedKeepCard:
             return AnyShapeStyle(.quaternary)
         }

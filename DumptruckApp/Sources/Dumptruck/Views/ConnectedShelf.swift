@@ -371,6 +371,9 @@ private struct ShelfTile: View {
             Button("Choose Source Folder Inside…") {
                 model.chooseFolder(inside: endpoint.path, as: .source)
             }
+            Button("Choose Source Files Inside…") {
+                model.chooseSourceFiles(inside: endpoint.path)
+            }
         }
         if canDestination {
             Button("Choose Mirrored Folder Inside…") {

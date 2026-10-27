@@ -162,6 +162,116 @@ enum LooseSourceStagingCheck {
         model.jobs = []
         model.releaseLooseSourceIfUnused(assigned)
         require(!fm.fileExists(atPath: assigned), "with no job left the set is removed")
+
+        // 9. Files on another drive (a disk image here) stage as a selection
+        //    set: a list, no clones, folders kept below the shared one.
+        let drive = try mountScratchVolume(at: root.appendingPathComponent("Drive").path,
+                                           image: root.appendingPathComponent("drive.dmg").path)
+        defer { detachScratchVolume(drive) }
+        try fm.createDirectory(atPath: drive + "/DCIM/A001", withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: drive + "/DCIM/B001", withIntermediateDirectories: true)
+        let pickA = drive + "/DCIM/A001/clip.braw"
+        let pickB = drive + "/DCIM/B001/clip.braw"
+        try write(pickA, 4096)
+        try write(pickB, 2048)
+        try write(drive + "/DCIM/A001/unpicked.braw", 1024)
+        let picked = try LooseSourceStaging.stage(files: [pickB, pickA])
+        require(LooseSourceStaging.isSelectionSet(picked), "drive files must stage as a selection set")
+        require(LooseSourceStaging.engineFlags(for: picked) == ["--selection"],
+                "a selection set adds --selection")
+        require(listing(picked) == [LooseSourceStaging.selectionFolder],
+                "a selection set holds the list only, no clones: \(listing(picked))")
+        let manifestData = try Data(contentsOf: URL(fileURLWithPath: picked + "/"
+            + LooseSourceStaging.selectionFolder + "/" + LooseSourceStaging.selectionManifest))
+        let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any]
+        require(manifest?["version"] as? Int == 1
+                && manifest?["root"] as? String == drive + "/DCIM"
+                && manifest?["files"] as? [String] == ["B001/clip.braw", "A001/clip.braw"],
+                "manifest lists the picked files under their shared folder: \(String(describing: manifest))")
+        require(fm.contentsEqual(atPath: pickA, andPath: pickA) && fm.fileExists(atPath: pickB),
+                "originals stay put")
+        // The set's own creation reaches FSEvents after a watcher arms; the
+        // staged-source watcher must not call that a card change.
+        final class Fired: @unchecked Sendable { var value = false }
+        let fired = Fired()
+        let fresh = try LooseSourceStaging.stage(files: [pickA, pickB])
+        let watcher = SourceMutationMonitor(path: fresh, filter: .sourceJunk(root: fresh)) {
+            fired.value = true
+        }
+        require(watcher != nil, "a selection set can be watched")
+        Thread.sleep(forTimeInterval: 1.5)
+        _ = watcher?.stop()
+        require(!fired.value, "staging a selection set must not read as a card change")
+        _ = LooseSourceStaging.remove(fresh)
+        let single = try LooseSourceStaging.stage(files: [pickA])
+        require((try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: single
+            + "/.selection/manifest.json")))) .flatMap { $0 as? [String: Any] }?["root"] as? String
+                == drive + "/DCIM/A001", "one picked file is listed under its own folder")
+        _ = LooseSourceStaging.remove(single)
+        let beforeMixed = listing(stagingRoot.path).count
+        do {
+            _ = try LooseSourceStaging.stage(files: [pickA, clipA])
+            fatalError("files on two volumes must be refused")
+        } catch let refusal as LooseSourceStaging.Refusal {
+            require(refusal.message.contains("more than one drive"), "mixed-drive refusal says why: \(refusal.message)")
+        }
+        require(listing(stagingRoot.path).count == beforeMixed, "a mixed-drive refusal leaves nothing behind")
+        switch model.buildPlan(src: picked, rawRoots: [dest], cardLabel: "PICKED") {
+        case .success(let built):
+            require(built.args.contains("--loose-files") && built.args.contains("--selection"),
+                    "a selection set plans with --loose-files --selection: \(built.args)")
+            require(built.args[3] == picked, "the set stays the planned source: \(built.args)")
+        case .failure(let err):
+            fatalError("buildPlan for a selection set failed: \(err.message)")
+        }
+        let pickedPlan = JournalLaunchPlan(
+            src: picked, rawRoots: [dest], destinations: [dest + "/SHOW/Raws"],
+            args: ["-m", "dumptruck.cli", "offload", picked, dest + "/SHOW/Raws",
+                   "--label", "PICKED", "--json", "--loose-files", "--selection"],
+            enginePython: engineRoot + "/.venv/bin/python", engineRoot: engineRoot,
+            sourceVolumeUUID: "src", rootVolumeUUIDs: ["dst"],
+            sourceFileID: "1:2", rootFileIDs: ["3:4"],
+            mirroredFolder: "SHOW", organizationFolder: "Raws", cardLabel: "PICKED")
+        require(LaunchPlanValidation.isStructurallySafe(pickedPlan), "--selection must be a canonical flag")
+        // A selection copying from the drive keeps the drive from a one-click
+        // eject, though its path is the staging folder (Sol review S1).
+        let driveVolume = Volume(path: drive, name: "DTPICK", isEjectable: true,
+                                 totalBytes: nil, freeBytes: nil)
+        let copying = Job(label: "PICKED", sourcePath: picked, destinations: [dest + "/SHOW/Raws"])
+        copying.phase = .copying
+        model.jobs = [copying]
+        require(!model.canEject(driveVolume), "the drive a selection is copying from must not one-click eject")
+        if case .transferRunning(_, let asSource)? = model.ejectHold(driveVolume) {
+            require(asSource, "the hold names the drive as the source")
+        } else {
+            fatalError("the hold must say a transfer is running")
+        }
+        model.jobs = []
+        require(LooseSourceStaging.remove(picked), "a selection set removes like any set")
+        require(fm.fileExists(atPath: pickA) && fm.fileExists(atPath: pickB),
+                "removing a selection set never touches the drive")
         model.terminateAllEngines()
+    }
+
+    /// A small APFS disk image mounted at `mountPoint`, standing in for a
+    /// camera drive: a second volume the staging root cannot clone from.
+    private static func mountScratchVolume(at mountPoint: String, image: String) throws -> String {
+        try FileManager.default.createDirectory(atPath: mountPoint, withIntermediateDirectories: true)
+        try hdiutil(["create", "-quiet", "-size", "8m", "-fs", "APFS", "-volname", "DTPICK", image])
+        try hdiutil(["attach", "-quiet", "-nobrowse", "-mountpoint", mountPoint, image])
+        return URL(fileURLWithPath: mountPoint).standardizedFileURL.path
+    }
+
+    private static func detachScratchVolume(_ mountPoint: String) {
+        try? hdiutil(["detach", "-quiet", "-force", mountPoint])
+    }
+
+    private static func hdiutil(_ args: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        process.arguments = args
+        try process.run()
+        process.waitUntilExit()
+        require(process.terminationStatus == 0, "hdiutil \(args.first ?? "") failed")
     }
 }

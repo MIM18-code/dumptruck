@@ -104,6 +104,18 @@ struct SourcesRail: View {
             }
             HStack {
                 Button {
+                    model.chooseSourceFiles()
+                } label: {
+                    Label("Choose Source Files…", systemImage: "doc.badge.plus")
+                        .font(.caption)
+                }
+                .buttonStyle(HoverHighlightButtonStyle())
+                .help("Copy only the clips you pick. Files on a drive copy "
+                      + "straight from it; you can also drag them here from Finder")
+                Spacer()
+            }
+            HStack {
+                Button {
                     model.chooseBatchSources()
                 } label: {
                     Label("Batch Sources…", systemImage: "square.stack.3d.up")
@@ -348,6 +360,9 @@ struct SourceCard: View {
                 Button("Choose Folder Inside \(vol.name)…") {
                     model.chooseFolder(inside: vol.path, as: .source)
                 }
+                Button("Choose Files on \(vol.name)…") {
+                    model.chooseSourceFiles(inside: vol.path)
+                }
             }
             Button("Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
@@ -407,7 +422,8 @@ struct SourceCard: View {
         switch echoJob?.verdict {
         case .safeToWipe: return Semantics.successText
         case .verifiedKeepCard: return Semantics.warningText
-        case .unverified, .failed: return Semantics.dangerText
+        case .unverified: return Semantics.warningText
+        case .failed: return Semantics.dangerText
         default: return .secondary
         }
     }

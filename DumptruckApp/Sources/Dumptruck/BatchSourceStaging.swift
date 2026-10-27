@@ -1399,6 +1399,7 @@ private final class BatchInspectionProcessState: @unchecked Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = ["-m", "dumptruck.cli", "inspect", sourcePath]
+            + LooseSourceStaging.engineFlags(for: sourcePath)
         process.currentDirectoryURL = URL(fileURLWithPath: engineRoot)
         process.environment = EngineRootResolver.processEnvironment(root: engineRoot)
         let pipe = Pipe()

@@ -317,8 +317,14 @@ def cmd_offload(args):
         # protocol major (a configurable engineRoot makes skew reachable).
         print(json.dumps({"event": "engine_hello", "protocol": PROTOCOL_VERSION,
                           "version": __version__}), flush=True)
-    loose = bool(getattr(args, "loose_files", False))
+    picked = bool(getattr(args, "selection", False))
+    loose = picked or bool(getattr(args, "loose_files", False))
+    source, selection = args.source, None
     try:
+        if picked:
+            # The set folder holds a list of files picked on a drive; the
+            # drive folder is the real source and only those files copy.
+            source, selection = engine.load_selection(args.source)
         if loose:
             # A GUI-staged folder of clones. It is not a card: no format
             # signature, no dataset identity, no label memory, no continuation.
@@ -435,7 +441,7 @@ def cmd_offload(args):
 
     try:
         result = engine.offload(
-            args.source,
+            source,
             args.destinations,
             label=label,
             hash_formats=formats,
@@ -444,6 +450,7 @@ def cmd_offload(args):
             reverify_existing=args.reverify_existing,
             event=ev,
             loose_files=loose,
+            selection=selection,
         )
     except Exception as e:  # noqa: BLE001 — the GUI must always get a reason
         if args.json:
@@ -700,9 +707,16 @@ def cmd_verify(args):
 def cmd_inspect(args):
     """One-shot JSON: detection + identity + inventory for a mounted source (GUI pre-start)."""
     try:
-        card = cards.detect(args.source)
-        known, _vol, _anchors, ambiguous = identity.identify(args.source)
-        entries, _dirs, warnings = engine.scan_source(args.source)
+        if getattr(args, "selection", False):
+            # Picked files are not a card: no detection, no identity.
+            root, picked = engine.load_selection(args.source)
+            card = cards.CardInfo("loose", "Loose files")
+            known, ambiguous = None, False
+            entries, _dirs, warnings = engine.scan_selected(root, picked)
+        else:
+            card = cards.detect(args.source)
+            known, _vol, _anchors, ambiguous = identity.identify(args.source)
+            entries, _dirs, warnings = engine.scan_source(args.source)
     except (RuntimeError, OSError) as e:
         # A refusal must reach the GUI as its actual reason, not a traceback
         # on a discarded stderr and a generic "check the engine folder" hint
@@ -840,6 +854,9 @@ def main(argv=None):
     o.add_argument("--loose-files", action="store_true",
                    help="source is a GUI-staged folder of loose-file clones: no card identity, "
                         "no label memory, never wipe-authorized")
+    o.add_argument("--selection", action="store_true",
+                   help="source is a GUI selection set: copy only the files it lists, straight "
+                        "from their drive folder (implies --loose-files)")
     o.add_argument("--json", action="store_true", help="JSON-lines events on stdout")
     # The GUI passes a unique token so a relaunch can identify and terminate
     # only its own orphan engine. The engine does not use the token for copy
@@ -860,6 +877,8 @@ def main(argv=None):
 
     i = sub.add_parser("inspect", help="JSON detection + identity + inventory for a source")
     i.add_argument("source")
+    i.add_argument("--selection", action="store_true",
+                   help="source is a GUI selection set (see offload --selection)")
     i.set_defaults(fn=cmd_inspect)
 
     w = sub.add_parser("wrap-report", help="aggregate multiple offload receipts into a shoot-day wrap report")

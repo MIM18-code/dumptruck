@@ -70,6 +70,10 @@ struct DumptruckCoreApplication: App {
                     model.chooseFolder(as: "source")
                 }
                 .keyboardShortcut("o", modifiers: [.command])
+                Button("Choose Source Files…") {
+                    model.chooseSourceFiles()
+                }
+                .keyboardShortcut("o", modifiers: [.command, .option])
                 Button("Choose Destination Folder…") {
                     model.chooseDestinationFolder()
                 }

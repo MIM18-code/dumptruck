@@ -30,7 +30,10 @@ struct HelpGuideView: View {
                     on its tile and it moves to the left rail as the source. \
                     You can also drag a tile onto a rail. A folder can be a \
                     source too, via "Choose Source Folder…" at the bottom of \
-                    the left rail or the folder button on a drive's tile.
+                    the left rail or the folder button on a drive's tile. To \
+                    copy only some clips, use "Choose Source Files…" or drag \
+                    the files onto the left rail. Clips on a drive copy \
+                    straight from it; they are never marked safe to wipe.
 
                     2.  Click Destination on two drives' tiles. They move to \
                     the right rail. Two, because one copy on one drive is not \
