@@ -77,7 +77,7 @@ enum LaunchPlanValidation {
         var seen = Set<String>()
         let flagOptions = Set(["--fast", "--no-source-verify", "--reverify-existing",
                                "--no-report", "--no-thumbs", "--slate-first",
-                               "--loose-files"])
+                               "--loose-files", "--selection"])
         while cursor < plan.args.count {
             let option = plan.args[cursor]
             cursor += 1

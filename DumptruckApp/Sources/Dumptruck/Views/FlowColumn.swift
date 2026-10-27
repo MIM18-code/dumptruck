@@ -745,7 +745,8 @@ struct JobCard: View {
     private var cardRail: AnyShapeStyle {
         switch job.verdict {
         case .running:                     return AnyShapeStyle(Semantics.running)
-        case .failed, .unverified:         return AnyShapeStyle(Semantics.danger)
+        case .failed:                      return AnyShapeStyle(Semantics.danger)
+        case .unverified:                  return AnyShapeStyle(Semantics.warning)
         case .safeToWipe, .verifiedKeepCard: return AnyShapeStyle(.quaternary)
         }
     }
@@ -1572,7 +1573,10 @@ struct DestinationLane: View {
         if authorityWithdrawnHere { return .failed }
         if progress.filesFailed > 0 { return .failed }
         if !job.isRunning {
-            return job.fullyVerified ? .complete : .failed
+            if job.fullyVerified { return .complete }
+            // Finished clean but not read back (Fast mode): keep the card,
+            // nothing failed. A failed file was caught above.
+            return job.phase == .done ? .unverified : .failed
         }
         if job.phase == .reports { return .sealing }
         return .running
@@ -1728,6 +1732,7 @@ struct DestinationLane: View {
     private var terminusSymbol: String {
         switch state {
         case .failed: return "xmark.octagon.fill"
+        case .unverified: return "exclamationmark.triangle.fill"
         case .complete: return "checkmark.circle.fill"
         case .detached: return "eject.circle.fill"
         default: return "externaldrive.fill"
@@ -1737,7 +1742,7 @@ struct DestinationLane: View {
         switch state {
         case .failed: return Semantics.dangerText
         case .complete: return Semantics.successText
-        case .sealing, .detached: return Semantics.warningText
+        case .sealing, .detached, .unverified: return Semantics.warningText
         default: return Semantics.destinationText
         }
     }
@@ -1774,8 +1779,9 @@ struct DestinationLane: View {
 /// for planned (bench) lanes — nothing has moved yet.
 struct LaneTrack: View {
     /// `detached`: the lane's drive was ejected after the verdict. Not a
-    /// failure; the copy is simply no longer watched.
-    enum LaneState { case planned, running, sealing, complete, failed, detached }
+    /// failure; the copy is simply no longer watched. `unverified`: copied
+    /// clean, size-checked only.
+    enum LaneState { case planned, running, sealing, complete, unverified, failed, detached }
     let fraction: Double
     let state: LaneState
 
@@ -1783,7 +1789,7 @@ struct LaneTrack: View {
         switch state {
         case .planned: return .clear
         case .running: return Semantics.running
-        case .sealing, .detached: return Semantics.warning
+        case .sealing, .detached, .unverified: return Semantics.warning
         case .complete: return Semantics.success
         case .failed: return Semantics.danger
         }

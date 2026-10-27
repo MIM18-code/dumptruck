@@ -1606,6 +1606,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Pick clips as the source, the panel's version of dropping files on
+    /// the rail. Files on a drive copy straight from it (a selection set);
+    /// files on this Mac stage as clones. Opened from a drive, the panel
+    /// starts there.
+    func chooseSourceFiles(inside start: String? = nil) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.directoryURL = start.map { URL(fileURLWithPath: $0) }
+        panel.prompt = "Use as Source"
+        panel.message = "Pick the clips to offload. Hold ⌘ or ⇧ to pick several."
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        stageDroppedSources(panel.urls.map(\.path))
+    }
+
     /// Set/replace the shared destination folder from a real folder on one
     /// drive. Only the chosen folder must already exist. Peer folders on all
     /// other destinations are planned now and created atomically at launch.
@@ -2095,7 +2111,7 @@ final class AppModel: ObservableObject {
         if !labelEditedByUser { label = "" }
         inspectionToken += 1
         let token = inspectionToken
-        runEngine(["inspect", path]) { [weak self] data in
+        runEngine(["inspect", path] + LooseSourceStaging.engineFlags(for: path)) { [weak self] data in
             guard let self else { return }
             // A LATE result for a source the operator has moved on from must
             // never overwrite the current card's inspection or label.
@@ -3360,6 +3376,7 @@ final class AppModel: ObservableObject {
         var args = ["-m", "dumptruck.cli", "offload", src] + dests
         args += ["--label", cardLabel, "--json"]
         if LooseSourceStaging.isStagedSet(src) { args.append("--loose-files") }
+        args += LooseSourceStaging.engineFlags(for: src)
         if fast || d.string(forKey: Pref.verifyMode) == "fast" { args.append("--fast") }
         if d.object(forKey: Pref.sourceReread) != nil, !d.bool(forKey: Pref.sourceReread) {
             args.append("--no-source-verify")
@@ -4557,9 +4574,9 @@ final class AppModel: ObservableObject {
         if batchStagingModel.candidates.contains(where: { pathsOverlap($0.path, volume.path) }) {
             return false
         }
-        let stagedAsSource = sourcePath.map { pathsOverlap($0, volume.path) } == true
+        let stagedAsSource = sourcePath.map { sourceReads($0, volume.path) } == true
         let involved = runsNewestFirst { job in
-            pathsOverlap(job.sourcePath, volume.path)
+            sourceReads(job.sourcePath, volume.path)
                 || job.destinations.contains(where: { pathsOverlap($0, volume.path) })
         }
         // A source staged but never verified (or re-staged/re-written since
@@ -4569,7 +4586,7 @@ final class AppModel: ObservableObject {
         if involved.contains(where: { $0.isRunning }) { return false }
         // jobs is newest-first. A later verified retry supersedes an older
         // failure for the same source; the reverse ordering must stay locked.
-        let sourceJobs = involved.filter { pathsOverlap($0.sourcePath, volume.path) }
+        let sourceJobs = involved.filter { sourceReads($0.sourcePath, volume.path) }
         // A historical source record is evidence for the searchable history,
         // not a current mount assignment. One-click source eject needs live
         // identity proof: either the staged session or a batch session with
@@ -4582,6 +4599,13 @@ final class AppModel: ObservableObject {
             guard !stagedAsSource else { return false }
         }
         return Job.latestSourceRunsAllowEject(sourceJobs)
+    }
+
+    /// True when a job or staged source with this path reads from the
+    /// volume. A selection set lives in the staging folder but reads from
+    /// the drive it lists.
+    private func sourceReads(_ sourcePath: String, _ volumePath: String) -> Bool {
+        pathsOverlap(LooseSourceStaging.sourceLocation(of: sourcePath), volumePath)
     }
 
     /// Why `canEject` withheld the one-click eject. The eject control's
@@ -4652,17 +4676,17 @@ final class AppModel: ObservableObject {
     func ejectHold(_ volume: Volume) -> EjectHold? {
         guard !canEject(volume) else { return nil }
         let involved = runsNewestFirst { job in
-            pathsOverlap(job.sourcePath, volume.path)
+            sourceReads(job.sourcePath, volume.path)
                 || job.destinations.contains(where: { pathsOverlap($0, volume.path) })
         }
         if let running = involved.first(where: { $0.isRunning }) {
-            return .transferRunning(running, asSource: pathsOverlap(running.sourcePath, volume.path))
+            return .transferRunning(running, asSource: sourceReads(running.sourcePath, volume.path))
         }
         if journalError != nil { return .journalUnavailable }
         // Same newest-per-source rule as latestSourceRunsAllowEject: an older
         // failure superseded by a later verified retry is history.
         var latestBySource: [String: Job] = [:]
-        let sourceJobs = involved.filter { pathsOverlap($0.sourcePath, volume.path) }
+        let sourceJobs = involved.filter { sourceReads($0.sourcePath, volume.path) }
         for job in sourceJobs where latestBySource[job.sourcePath] == nil {
             latestBySource[job.sourcePath] = job
         }

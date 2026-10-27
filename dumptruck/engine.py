@@ -23,6 +23,7 @@ import ctypes
 import contextlib
 import errno
 import fcntl
+import json
 import os
 import queue
 import signal
@@ -48,6 +49,11 @@ PROGRESS_INTERVAL_S = 0.1
 
 ASCMHL_DIRNAME = "ascmhl"
 CAMERA_MHL_QUARANTINE = "ascmhl_camera"
+
+# A GUI selection set: files picked on a drive, copied straight from it.
+# The set folder holds only this manifest; a set of clones is flat files,
+# so a folder inside a set can never be mistaken for a dropped file.
+SELECTION_MANIFEST = os.path.join(".selection", "manifest.json")
 
 
 class _Commit:
@@ -269,6 +275,88 @@ class OffloadResult:
             "safe_to_wipe_source": safe,
             "safe_to_wipe_blockers": blockers,
         }
+
+
+def load_selection(set_dir):
+    """Read a selection set's manifest: (root, [rel paths]).
+    Refuses anything but absolute normalized root and plain relative paths
+    below it, so a hand-edited manifest cannot reach outside the root."""
+    path = os.path.join(set_dir, SELECTION_MANIFEST)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"cannot read the picked-files list at {path}: {e}") from e
+
+    def bad(why):
+        return RuntimeError(f"picked-files list at {path} is invalid: {why}")
+
+    if not isinstance(data, dict) or data.get("version") != 1:
+        raise bad("unknown version")
+    root, files = data.get("root"), data.get("files")
+    if not isinstance(root, str) or not os.path.isabs(root) or os.path.normpath(root) != root:
+        raise bad("the drive folder is not an absolute path")
+    if not isinstance(files, list) or not files:
+        raise bad("no files")
+    seen = set()
+    for rel in files:
+        if (not isinstance(rel, str) or not rel or os.path.isabs(rel)
+                or os.path.normpath(rel) != rel or rel == "."
+                or rel == ".." or rel.startswith(".." + os.sep)
+                or any(ord(c) < 32 or ord(c) == 0x7f for c in rel)):
+            raise bad(f"{rel!r} is not a plain path inside the drive folder")
+        if rel in seen:
+            raise bad(f"{rel!r} is listed twice")
+        seen.add(rel)
+    return root, list(files)
+
+
+def scan_selected(source_root, rel_paths, strict=True):
+    """scan_source for files the operator picked inside source_root: only
+    those files, and only the folders that lead to them. Nothing else on
+    the drive is walked, so an unreadable folder elsewhere on an 8 TB
+    volume cannot refuse the job. The plan scan (strict) refuses a picked
+    file that is missing or not a plain file; the final rescan leaves it
+    out instead, which lands in the ordinary removed-file path."""
+    source_root = os.path.abspath(source_root)
+    if not os.path.isdir(source_root):
+        raise RuntimeError(f"source is not a readable directory: {source_root}")
+    entries, dirs = [], set()
+    for rel in sorted(set(rel_paths)):
+        parts = rel.split(os.sep)
+        problem = None
+        # Every folder on the way must be a real folder: a symlinked one
+        # would let the plan read from somewhere other than the drive.
+        for i in range(1, len(parts)):
+            try:
+                st = os.lstat(os.path.join(source_root, *parts[:i]))
+            except FileNotFoundError:
+                problem = "is gone"
+                break
+            except OSError as e:
+                raise RuntimeError(f"cannot read {os.sep.join(parts[:i])}: {e}") from e
+            if not stat_mod.S_ISDIR(st.st_mode):
+                problem = f"sits under {os.sep.join(parts[:i])}, which is not a real folder"
+                break
+        if problem is None:
+            try:
+                st = os.lstat(os.path.join(source_root, rel))
+            except FileNotFoundError:
+                problem = "is gone"
+            except OSError as e:
+                raise RuntimeError(f"cannot stat source file {rel}: {e}") from e
+            else:
+                if not stat_mod.S_ISREG(st.st_mode):
+                    problem = "is not a plain file"
+        if problem is not None:
+            if strict:
+                raise RuntimeError(f"picked file {rel} {problem} — pick it again. Refused.")
+            continue
+        entries.append(FileEntry(rel_path=rel, size=st.st_size, mtime_ns=st.st_mtime_ns))
+        for i in range(1, len(parts)):
+            dirs.add(os.sep.join(parts[:i]))
+    return entries, sorted(dirs), []
 
 
 def scan_source(source_root):
@@ -1035,9 +1123,11 @@ def offload(
     reverify_existing=False,  # re-hash trusted-prior files at the destinations
     event=None,  # callback(dict) for progress/JSON-lines
     loose_files=False,  # GUI-staged clones of loose files: never wipe-authorized
+    selection=None,  # rel paths under source_root: copy only these files
 ):
     """Offload source_root into <dest_root>/<label>/ for each destination.
-    Returns OffloadResult."""
+    With `selection`, only those files (and the folders leading to them)
+    are planned, rescanned and copied. Returns OffloadResult."""
     ev = event or (lambda d: None)
     if "xxh64" not in hash_formats:
         hash_formats = ("xxh64", *hash_formats)
@@ -1107,7 +1197,10 @@ def offload(
     if not stat_mod.S_ISDIR(_scan_st.st_mode):
         raise RuntimeError(f"source is not a directory: {source_root}")
     _scan_pin = (_scan_st.st_dev, _scan_st.st_ino)
-    entries, source_dirs, scan_warnings = scan_source(source_root)
+    if selection is not None:
+        entries, source_dirs, scan_warnings = scan_selected(source_root, selection)
+    else:
+        entries, source_dirs, scan_warnings = scan_source(source_root)
     if not entries:
         # A wrong mount point, failed automount, or already-wiped card scans
         # empty. all([]) is True, so letting this continue would report a
@@ -1122,7 +1215,10 @@ def offload(
     # (round-11 finding 3).
     _early_hist_dir = os.path.join(source_root, ASCMHL_DIRNAME)
     early_camera_inventory = None
-    if os.path.isdir(_early_hist_dir) and not os.path.islink(_early_hist_dir):
+    # Picked files are not the card: the camera's history describes clips
+    # this job does not copy, so it is left on the drive.
+    if selection is None and os.path.isdir(_early_hist_dir) \
+            and not os.path.islink(_early_hist_dir):
         # Content-hashed baseline (round-13 finding 2): size+mtime rows let a
         # same-size rewrite with a restored timestamp impersonate the
         # scan-time evidence at every later comparison.
@@ -1255,7 +1351,7 @@ def offload(
                                verify_mode, source_reread, reverify_existing, ev,
                                source_dirs, scan_warnings, root_fds, root_pins,
                                source_pin, early_camera_inventory, source_fd,
-                               verify_admission)
+                               verify_admission, selection=selection)
         # Manifests seal HERE — descriptors and job flocks still held.
         _seal_manifests(result, card_roots, root_fds, root_pins, ev)
         return result
@@ -1859,7 +1955,7 @@ def _offload_locked(source_root, result, card_roots, entries, hash_formats,
                     verify_mode, source_reread, reverify_existing, ev,
                     initial_dirs, initial_warnings, root_fds, root_pins,
                     source_pin, early_camera_inventory, source_fd,
-                    verify_admission):
+                    verify_admission, selection=None):
     label = result.label
 
     def _source_intact(when):
@@ -2015,7 +2111,8 @@ def _offload_locked(source_root, result, card_roots, entries, hash_formats,
     # quarantine folder so OUR chain in ascmhl/ never mutates verified bytes.
     src_history = os.path.join(result.source, ASCMHL_DIRNAME)
     camera_history_snapshot = None
-    _hist_now = os.path.isdir(src_history) and not os.path.islink(src_history)
+    _hist_now = (selection is None and os.path.isdir(src_history)
+                 and not os.path.islink(src_history))
     if early_camera_inventory is not None and not _hist_now:
         # Camera history existed at scan time and is GONE (or a link) now:
         # source custody evidence was lost mid-job — close BOTH gates
@@ -2140,7 +2237,11 @@ def _offload_locked(source_root, result, card_roots, entries, hash_formats,
     try:
         if not _source_intact("before the final source rescan"):
             raise RuntimeError("source identity lost before the final rescan")
-        final_entries, final_dirs, final_warnings = scan_source(source_root)
+        if selection is not None:
+            final_entries, final_dirs, final_warnings = scan_selected(
+                source_root, selection, strict=False)
+        else:
+            final_entries, final_dirs, final_warnings = scan_source(source_root)
         if not _source_intact("after the final source rescan"):
             raise RuntimeError("source identity lost during the final rescan")
         initial = {e.rel_path: (e.size, e.mtime_ns) for e in entries}

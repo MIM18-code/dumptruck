@@ -3534,6 +3534,84 @@ else:
         engine._DestWriter._write_all = real_write88
         engine._cold_hash = real_hash88
 
+    print("[99] --selection: picked files copy straight from their drive folder, nothing else")
+    drive90 = os.path.join(base, "DRIVE90")
+    make_card(drive90, {"A001/x.braw": 64 * 1024, "A001/y.braw": 32 * 1024,
+                        "B001/z.braw": 16 * 1024, "ascmhl/0001_A001.mhl": 256})
+    locked90 = os.path.join(drive90, "Locked")
+    os.makedirs(locked90)
+    os.chmod(locked90, 0)
+    set90 = os.path.join(base, "Loose 2026-10-27 13.31.00")
+    os.makedirs(os.path.join(set90, ".selection"))
+
+    def write_manifest90(files, root=drive90):
+        with open(os.path.join(set90, ".selection", "manifest.json"), "w") as f:
+            json.dump({"version": 1, "root": root, "files": files}, f)
+
+    write_manifest90(["A001/x.braw", "B001/z.braw"])
+    d90a, d90b = os.path.join(base, "D90A"), os.path.join(base, "D90B")
+    home90 = os.path.join(base, "HOME90")
+    os.makedirs(d90a), os.makedirs(d90b), os.makedirs(home90)
+    env90 = dict(os.environ, DUMPTRUCK_HOME=home90)
+    try:
+        i90 = subprocess.run(
+            [sys.executable, "-m", "dumptruck.cli", "inspect", set90, "--selection"],
+            capture_output=True, text=True, cwd=HERE, env=env90)
+        ins90 = json.loads(i90.stdout or "{}")
+        check("inspect counts only the picked files and suggests the set's name",
+              i90.returncode == 0 and ins90.get("files") == 2
+              and ins90.get("bytes") == 80 * 1024
+              and ins90.get("suggested_label") == os.path.basename(set90)
+              and ins90.get("known") is False, i90.stdout + i90.stderr)
+        p90 = subprocess.run(
+            [sys.executable, "-m", "dumptruck.cli", "offload", set90, d90a, d90b,
+             "--label", "PICKED90", "--json", "--no-report", "--loose-files", "--selection"],
+            capture_output=True, text=True, cwd=HERE, env=env90)
+        events90 = [json.loads(line) for line in p90.stdout.splitlines() if line.strip()]
+        att90 = next((e for e in events90 if e.get("event") == "attestation"), {})
+        done90 = events90[-1] if events90 else {}
+        check("a selection offload completes fully verified with a second source read",
+              p90.returncode == 0 and done90.get("event") == "offload_complete"
+              and done90.get("fully_verified") is True
+              and att90.get("source_read_count") == 2, (p90.stdout + p90.stderr)[-600:])
+        check("a selection offload is never wipe-authorized",
+              att90.get("safe_to_wipe_source") is False
+              and any(b.startswith("loose files:") for b in att90.get("safe_to_wipe_blockers", [])),
+              str(att90.get("safe_to_wipe_blockers")))
+        for root in (d90a, d90b):
+            card90 = os.path.join(root, "PICKED90")
+            copied90 = sorted(os.path.relpath(os.path.join(dp, n), card90)
+                              for dp, _dn, names in os.walk(card90) for n in names
+                              if n.endswith(".braw"))
+            check(f"only the picked files, in their drive folders, at {os.path.basename(root)}",
+                  copied90 == ["A001/x.braw", "B001/z.braw"], str(copied90))
+            check(f"the camera history of unpicked clips stays on the drive at {os.path.basename(root)}",
+                  not os.path.exists(os.path.join(card90, "ascmhl_camera")))
+            with open(os.path.join(drive90, "A001/x.braw"), "rb") as a, \
+                    open(os.path.join(card90, "A001/x.braw"), "rb") as b:
+                check(f"picked bytes match the drive at {os.path.basename(root)}", a.read() == b.read())
+
+        def refused90(files, root=drive90):
+            write_manifest90(files, root)
+            dest = os.path.join(base, f"D90R{len(os.listdir(base))}")
+            os.makedirs(dest)
+            p = subprocess.run(
+                [sys.executable, "-m", "dumptruck.cli", "offload", set90, dest,
+                 "--label", "PICKED90", "--json", "--no-report", "--loose-files", "--selection"],
+                capture_output=True, text=True, cwd=HERE, env=env90)
+            return p.returncode != 0 and not os.path.exists(os.path.join(dest, "PICKED90"))
+
+        check("a manifest path that climbs out of the drive folder is refused",
+              refused90(["../LOOSE82-STAGE/notes.txt"]))
+        check("an absolute manifest path is refused", refused90([os.path.join(drive90, "A001/x.braw")]))
+        check("a relative drive folder is refused", refused90(["A001/x.braw"], root="DRIVE90"))
+        check("a picked file that is gone refuses the job before writing",
+              refused90(["A001/x.braw", "A001/gone.braw"]))
+        os.symlink(os.path.join(drive90, "A001"), os.path.join(drive90, "LinkDir"))
+        check("a picked file under a symlinked folder is refused", refused90(["LinkDir/x.braw"]))
+    finally:
+        os.chmod(locked90, 0o755)
+
     scenario_final_verify_lifecycle(base)
     scenario_final_verify_topology()
 

@@ -12,7 +12,13 @@ import Darwin
 ///
 /// Rules: flatten (a drop is "these files", not their folders), refuse a
 /// name collision rather than rename, refuse anything that is not a plain
-/// readable file on the staging volume. A refusal leaves nothing behind.
+/// readable file. A refusal leaves nothing behind.
+///
+/// Files on another drive cannot be cloned here (Joshua, 2026-10-27: picking
+/// clips off an 8 TB URSA module was refused). They stage as a selection
+/// set instead: the set folder holds only a list of the picked files and the
+/// drive folder they share, and the engine (`--selection`) copies those
+/// files straight from the drive, keeping their folders below that one.
 enum LooseSourceStaging {
     struct Refusal: LocalizedError {
         let message: String
@@ -28,6 +34,12 @@ enum LooseSourceStaging {
     }()
 
     static let folderPrefix = "Loose "
+
+    /// Inside a selection set. A set of clones is flat files, so a folder
+    /// here marks a selection set; a dropped file can never fake one.
+    /// Must match engine.SELECTION_MANIFEST.
+    static let selectionFolder = ".selection"
+    static let selectionManifest = "manifest.json"
 
     /// True for a path inside the staging root (the staged set itself or
     /// anything below it). Detection by location, not by a journal flag, so
@@ -45,6 +57,38 @@ enum LooseSourceStaging {
             && (std as NSString).deletingLastPathComponent == root.standardizedFileURL.path
     }
 
+    /// True for a staged set that lists files on a drive rather than
+    /// holding clones. The engine runs it with `--selection`.
+    static func isSelectionSet(_ path: String, root: URL = root) -> Bool {
+        guard isStagedSet(path, root: root) else { return false }
+        let std = URL(fileURLWithPath: path).standardizedFileURL.path
+        var st = stat()
+        return lstat(std + "/" + selectionFolder, &st) == 0 && st.st_mode & S_IFMT == S_IFDIR
+    }
+
+    /// Where a set's bytes are read from: the drive folder a selection set
+    /// lists, else the path itself. Eject and drive-use checks compare this,
+    /// so a drive a selection is copying from counts as in use.
+    static func sourceLocation(of path: String, root: URL = root) -> String {
+        guard isSelectionSet(path, root: root) else { return path }
+        let std = URL(fileURLWithPath: path).standardizedFileURL.path
+        if let cached = selectionRoots[std] { return cached }
+        let manifest = URL(fileURLWithPath: std + "/" + selectionFolder + "/" + selectionManifest)
+        guard let data = try? Data(contentsOf: manifest),
+              let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let driveFolder = body["root"] as? String else { return path }
+        selectionRoots[std] = driveFolder
+        return driveFolder
+    }
+
+    /// A set's manifest never changes once written.
+    nonisolated(unsafe) private static var selectionRoots: [String: String] = [:]
+
+    /// Engine arguments that mark a staged set, after the source path.
+    static func engineFlags(for path: String, root: URL = root) -> [String] {
+        isSelectionSet(path, root: root) ? ["--selection"] : []
+    }
+
     /// Stage `files` as one set. Returns the set folder's path.
     /// Validation runs to completion before the first clone: a refused drop
     /// creates nothing. Any clone failure removes the half-built set.
@@ -59,9 +103,8 @@ enum LooseSourceStaging {
             throw Refusal(message: "Cannot reach the staging folder at \(root.path)")
         }
 
-        var seenNames: [String: String] = [:]   // NFC+casefold key -> first path
         var seenPaths = Set<String>()
-        var accepted: [String] = []
+        var accepted: [(path: String, device: dev_t)] = []
         for path in files {
             guard seenPaths.insert(path).inserted else { continue }
             var st = stat()
@@ -88,15 +131,26 @@ enum LooseSourceStaging {
                 throw Refusal(message: "\(display(path)) is not downloaded from iCloud yet, "
                     + "download it first, then drop it again")
             }
-            guard st.st_dev == rootStat.st_dev else {
-                let volume = volumeName(of: path)
-                throw Refusal(message: "\(display(path)) lives on \(volume), not on this Mac's disk, "
-                    + "drop the folder it is in instead, so the drive is the source")
-            }
             let name = (path as NSString).lastPathComponent
             if name.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) {
                 throw Refusal(message: "\(display(path)) has control characters in its name")
             }
+            accepted.append((path, st.st_dev))
+        }
+
+        let devices = Set(accepted.map(\.device))
+        if devices != [rootStat.st_dev] {
+            guard devices.count == 1 else {
+                let names = Set(accepted.map { volumeName(of: $0.path) }).sorted()
+                throw Refusal(message: "These files are on more than one drive "
+                    + "(\(names.joined(separator: ", "))). Add each drive's files on their own")
+            }
+            return try stageSelection(accepted.map(\.path), root: root, now: now)
+        }
+
+        var seenNames: [String: String] = [:]   // NFC+casefold key -> first path
+        for (path, _) in accepted {
+            let name = (path as NSString).lastPathComponent
             let key = name.precomposedStringWithCanonicalMapping.lowercased()
             if let first = seenNames[key] {
                 throw Refusal(message: "Two files are both named \(name) "
@@ -104,18 +158,61 @@ enum LooseSourceStaging {
                     + "Rename one, or drop their folders instead")
             }
             seenNames[key] = path
-            accepted.append(path)
         }
 
         let setURL = try uniqueSetFolder(root: root, now: now)
         do {
-            for path in accepted {
+            for (path, _) in accepted {
                 let dest = setURL.appendingPathComponent((path as NSString).lastPathComponent).path
                 try clone(path, to: dest)
             }
         } catch {
             try? FileManager.default.removeItem(at: setURL)
             throw error
+        }
+        return setURL.path
+    }
+
+    /// The folder all `paths` share, and each path relative to it.
+    static func commonFolder(of paths: [String]) -> (root: String, relative: [String]) {
+        let split = paths.map { ($0 as NSString).pathComponents }
+        var common = Array(split[0].dropLast())
+        for parts in split.dropFirst() {
+            let parent = parts.dropLast()
+            var n = 0
+            while n < common.count, n < parent.count, common[n] == parent[n] { n += 1 }
+            common = Array(common.prefix(n))
+        }
+        let root = NSString.path(withComponents: common)
+        let relative = split.map { NSString.path(withComponents: Array($0.dropFirst(common.count))) }
+        return (root, relative)
+    }
+
+    /// Files on one drive: write the list, copy nothing. Paths keep their
+    /// folders below the shared one, so same-named clips from two folders
+    /// do not collide.
+    private static func stageSelection(_ paths: [String], root: URL, now: Date) throws -> String {
+        let (driveFolder, relative) = commonFolder(of: paths)
+        var seen: [String: String] = [:]
+        for (path, rel) in zip(paths, relative) {
+            let key = rel.precomposedStringWithCanonicalMapping.lowercased()
+            if let first = seen[key] {
+                throw Refusal(message: "\(display(first)) and \(display(path)) differ only "
+                    + "in letter case. Add one at a time")
+            }
+            seen[key] = path
+        }
+        let body: [String: Any] = ["version": 1, "root": driveFolder, "files": relative]
+        let data = try JSONSerialization.data(withJSONObject: body,
+                                              options: [.prettyPrinted, .sortedKeys])
+        let setURL = try uniqueSetFolder(root: root, now: now)
+        do {
+            let folder = setURL.appendingPathComponent(selectionFolder, isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            try data.write(to: folder.appendingPathComponent(selectionManifest), options: .atomic)
+        } catch {
+            try? FileManager.default.removeItem(at: setURL)
+            throw Refusal(message: "Cannot write the list of picked files: \(error.localizedDescription)")
         }
         return setURL.path
     }
