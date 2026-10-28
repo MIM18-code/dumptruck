@@ -38,7 +38,10 @@ struct HelpGuideView: View {
                     2.  Click Destination on two drives' tiles. They move to \
                     the right rail. Two, because one copy on one drive is not \
                     a backup. SAFE TO WIPE requires two separate physical \
-                    devices, and two partitions on the same disk do not count.
+                    devices, and two partitions on the same disk do not count. \
+                    A network share (a NAS over SMB, for example) gets a \
+                    verified copy like any drive, but it does not count as one \
+                    of the two: Dumptruck can't see the disks behind it.
 
                     3.  Name the card. The name becomes the folder on every \
                     destination, and that folder is where the card's future \

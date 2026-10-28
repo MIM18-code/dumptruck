@@ -137,6 +137,17 @@ def fsync_dir(path) -> bool:
         os.close(fd)
 
 
+_SHARE_KINDS = {"smbfs": "SMB", "nfs": "NFS", "webdav": "WebDAV", "afpfs": "AFP"}
+
+
+def share_label(volume):
+    """'FOLIAGE (SMB)' for a network volume from describe_volume()."""
+    import os
+
+    mount, fstype, _local = volume
+    return f"{os.path.basename(mount) or mount} ({_SHARE_KINDS.get(fstype, fstype)})"
+
+
 def flush_failure_text(err, volume):
     """Operator-facing reason a destination could not flush to media."""
     import errno as _errno
@@ -146,8 +157,13 @@ def flush_failure_text(err, volume):
         return f"F_FULLFSYNC failed ({code}); plain fsync was used"
     mount, fstype, local = volume
     if not local and err in (_errno.ENOTTY, _errno.ENOTSUP):
-        return (f"{mount} is a network volume ({fstype}) that does not support "
-                f"F_FULLFSYNC ({code}); plain fsync was used")
+        # A DIT reads this, not a kernel engineer: network shares never
+        # confirm a flush, and that is normal, not a fault.
+        # Durability only: verification results live elsewhere (a Fast run
+        # never reads back, so this must not claim it did).
+        return (f"{share_label(volume)} is a network share: macOS can't confirm "
+                "the server has written the copy to its disks. Copies on network "
+                "shares don't count toward SAFE TO WIPE")
     where = "network" if not local else "local"
     return f"{mount} ({fstype}, {where}) rejected F_FULLFSYNC ({code}); plain fsync was used"
 

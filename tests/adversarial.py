@@ -1071,7 +1071,7 @@ def scenario_flush_failure_names_the_volume(base):
     F_FULLFSYNC fails on network volumes (measured: ENOTTY on WebDAV). The
     verdict stays withheld; the blocker and the report now name the volume."""
     import errno as _errno
-    print("[100] a failed flush-to-media names the destination volume and why")
+    print("[100] a network share reads as a normal offload; a local flush failure stays DEGRADED")
     src100 = os.path.join(base, "CARD100")
     dst100 = os.path.join(base, "D100")
     os.makedirs(dst100)
@@ -1089,28 +1089,107 @@ def scenario_flush_failure_names_the_volume(base):
           str(vol100))
 
     real_err, real_desc = engine.macio.full_fsync_error, engine.macio.describe_volume
+    real_stores100 = engine.macio.physical_stores
     try:
+        # What an SMB share really reports: no flush, no resolvable disk.
         engine.macio.full_fsync_error = lambda fd: _errno.ENOTTY
         engine.macio.describe_volume = lambda fd: ("/Volumes/FOLIAGE", "smbfs", False)
+        engine.macio.physical_stores = lambda path: engine.macio.UNKNOWN_DEVICE
         res100 = engine.offload(src100, [dst100], label="SR100")
     finally:
         engine.macio.full_fsync_error, engine.macio.describe_volume = real_err, real_desc
+        engine.macio.physical_stores = real_stores100
     att100 = res100.attestation()
     blockers100 = att100["safe_to_wipe_blockers"]
-    flush100 = [b for b in blockers100 if b.startswith(
-        "full flush-to-media failed on at least one destination file")]
-    check("the flush failure still degrades the attestation and blocks the wipe",
-          not att100["full_flush_before_close"] and not att100["safe_to_wipe_source"]
-          and len(flush100) == 1, str(blockers100))
-    check("the blocker names the volume, its filesystem and the error",
-          flush100 and "/Volumes/FOLIAGE is a network volume (smbfs)" in flush100[0]
-          and "ENOTTY" in flush100[0], str(flush100))
+    check("a copy only on a network share still never earns SAFE TO WIPE",
+          not att100["full_flush_before_close"] and not att100["safe_to_wipe_source"],
+          str(att100))
+    check("the share is named in plain words, without kernel jargon",
+          any(b.startswith("SAFE TO WIPE needs verified copies on 2 separate local drives; "
+                           "this run has 0. Copies on network shares don't count: FOLIAGE (SMB)")
+              for b in blockers100)
+          and len(blockers100) == 1
+          and not any("F_FULLFSYNC" in b or "flush-to-media" in b or "physical device" in b
+                      for b in blockers100), str(blockers100))
     check("the reason is recorded against the card folder that failed",
-          list(res100.flush_failures) == [os.path.join(dst100, "SR100")],
-          str(res100.flush_failures))
+          list(res100.flush_failures) == [os.path.realpath(os.path.join(dst100, "SR100"))]
+          and list(res100.network_roots) == [os.path.realpath(os.path.join(dst100, "SR100"))],
+          str((res100.flush_failures, res100.network_roots)))
     doc100, _ = report.build_report(res100, att100, SimpleNamespace(format_name="Generic"), {})
-    check("the report's Durability row carries the reason",
-          "DEGRADED" in doc100 and "/Volumes/FOLIAGE is a network volume (smbfs)" in doc100)
+    check("the report reads like a normal network offload, not a fault",
+          "DEGRADED" not in doc100
+          and "FOLIAGE (SMB) is a network share: macOS can&#x27;t confirm the server has written" in doc100
+          and "read back" not in doc100[doc100.find("Durability"):doc100.find("Why keep")]
+          and "network share, not counted as a drive: FOLIAGE (SMB)" in doc100
+          and "Why keep the card" in doc100, doc100[doc100.find("Durability"):][:900])
+
+    dst100l = os.path.join(base, "D100L")
+    os.makedirs(dst100l)
+    try:
+        engine.macio.full_fsync_error = lambda fd: _errno.EIO
+        engine.macio.describe_volume = lambda fd: ("/Volumes/LOCAL", "exfat", True)
+        res100l = engine.offload(src100, [dst100l], label="SR100L")
+    finally:
+        engine.macio.full_fsync_error, engine.macio.describe_volume = real_err, real_desc
+    att100l = res100l.attestation()
+    doc100l, _ = report.build_report(res100l, att100l, SimpleNamespace(format_name="Generic"), {})
+    check("a local drive that rejects the flush is still flagged DEGRADED",
+          not res100l.network_roots and "DEGRADED" in doc100l
+          and any(b.startswith("full flush-to-media failed on at least one destination file")
+                  and "/Volumes/LOCAL (exfat, local) rejected F_FULLFSYNC (EIO)" in b
+                  for b in att100l["safe_to_wipe_blockers"]),
+          str(att100l["safe_to_wipe_blockers"]))
+
+    # Card -> two local drives + the post-house NAS: the NAS never counts,
+    # so its unconfirmed flush must not block what the two drives earned.
+    import fcntl as _fcntl
+    def _fd_path(fd):
+        return _fcntl.fcntl(fd, 50, b"\0" * 1024).split(b"\0", 1)[0].decode()  # F_GETPATH
+
+    def _stores100(path):
+        if "D100NAS" in path:
+            return engine.macio.UNKNOWN_DEVICE
+        return frozenset({"disk100r1" if "D100R1" in path else "disk100r2"})
+
+    def _run100(stores, tag):
+        dests = [os.path.join(base, tag, n) for n in ("D100R1", "D100R2", "D100NAS")]
+        for d in dests:
+            os.makedirs(d)
+        try:
+            engine.macio.full_fsync_error = (
+                lambda fd: _errno.ENOTTY if "D100NAS" in _fd_path(fd) else real_err(fd))
+            engine.macio.describe_volume = (
+                lambda fd: ("/Volumes/POSTHOUSE", "smbfs", False)
+                if "D100NAS" in _fd_path(fd) else real_desc(fd))
+            engine.macio.physical_stores = stores
+            r = engine.offload(src100, dests, label="SR100" + tag)
+        finally:
+            engine.macio.full_fsync_error, engine.macio.describe_volume = real_err, real_desc
+            engine.macio.physical_stores = real_stores100
+        return r, r.attestation()
+
+    if engine.macio.IS_MACOS:
+        res100n, att100n = _run100(_stores100, "N")
+        check("two local drives + a NAS is SAFE TO WIPE; the NAS flush does not block it",
+              att100n["safe_to_wipe_source"] and att100n["distinct_physical_devices"] == 2
+              and not att100n["full_flush_before_close"]
+              and list(res100n.network_roots.values()) == ["POSTHOUSE (SMB)"],
+              str(att100n["safe_to_wipe_blockers"]))
+        _doc100n, receipt100n = report.build_report(
+            res100n, att100n, SimpleNamespace(format_name="Generic"), {})
+        report.validate_receipt_dict(json.loads(json.dumps(receipt100n)))
+        wrap100n, _ = report.build_wrap_report([receipt100n])
+        check("a wrap report explains why a SAFE card shows flush=false",
+              "false: POSTHOUSE (SMB) is a network share" in wrap100n,
+              wrap100n[wrap100n.find("POSTHOUSE") - 200:][:400])
+        # A "network" label on a volume whose disk DOES resolve excuses nothing.
+        _res, att100x = _run100(lambda p: frozenset(
+            {"disk100r1" if "D100R1" in p else "disk100r2" if "D100R2" in p else "disk100n"}), "X")
+        check("a share whose disk resolves cannot excuse its own failed flush",
+              not att100x["safe_to_wipe_source"]
+              and any(b.startswith("full flush-to-media failed")
+                      for b in att100x["safe_to_wipe_blockers"]),
+              str(att100x["safe_to_wipe_blockers"]))
 
     dst100b = os.path.join(base, "D100B")
     os.makedirs(dst100b)

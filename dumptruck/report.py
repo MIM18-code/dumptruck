@@ -131,6 +131,27 @@ def _copies_devices_text(att, labeled=False):
             if labeled else f"{copies} / {devices}")
 
 
+def _durability_html(result, att):
+    """The Durability row. A network share never confirms a flush to disk;
+    that is normal, so it reads as a note, not as DEGRADED."""
+    if att["full_flush_before_close"]:
+        return "F_FULLFSYNC succeeded per file before close"
+    failures = getattr(result, "flush_failures", {})
+    reasons = "".join(f"<br>{_esc(r)}" for r in sorted(set(failures.values())))
+    if failures and set(failures) <= set(getattr(result, "network_roots", {})):
+        return reasons[len("<br>"):]
+    return ('<span class="warn">DEGRADED — full flush-to-media failed on at least '
+            f'one file (plain fsync fallback){reasons}</span>')
+
+
+def _share_note(result):
+    shares = getattr(result, "network_roots", {})
+    if not shares:
+        return ""
+    names = ", ".join(sorted(set(shares.values())))
+    return _esc(f" (network share, not counted as a drive: {names})")
+
+
 def _attestation_text(attestation, field):
     """Render an attestation value without supplying an optimistic default."""
     if field not in attestation:
@@ -387,12 +408,9 @@ def build_report(result, att, card_info, media_info, dataset=None):
 <tr><td>Cache-bypass policy</td><td>{'F_NOCACHE succeeded on all destination writes and verify reads (data never entered the buffer cache)'
  if att['write_fd_nocache'] and att['verify_fd_nocache']
  else '<span class="warn">DEGRADED — F_NOCACHE failed on at least one descriptor; some verify reads may have been cache-served</span>'}</td></tr>
-<tr><td>Durability</td><td>{'F_FULLFSYNC succeeded per file before close'
- if att['full_flush_before_close']
- else '<span class="warn">DEGRADED — full flush-to-media failed on at least one file (plain fsync fallback)'
- + ''.join(f'<br>{_esc(r)}' for r in sorted(set(getattr(result, 'flush_failures', {}).values())))
- + '</span>'}</td></tr>
-<tr><td>Verified copies / physical devices</td><td>{_copies_devices_text(att)}</td></tr>
+<tr><td>Durability</td><td>{_durability_html(result, att)}</td></tr>
+<tr><td>Verified copies / physical devices</td><td>{_copies_devices_text(att)}{_share_note(result)}</td></tr>
+{'' if att['safe_to_wipe_source'] else '<tr><td>Why keep the card</td><td>' + '<br>'.join(_esc(b) for b in att.get('safe_to_wipe_blockers', [])) + '</td></tr>'}
 <tr><td>Codec/media validation</td><td class="warn">NOT PERFORMED — copy integrity only</td></tr>
 </table>
 
@@ -442,6 +460,9 @@ def build_report(result, att, card_info, media_info, dataset=None):
         "files_copied": len(copied),
         "bytes_copied": copied_bytes,
         "errors": result.errors,
+        # Why full_flush_before_close is false, in words a wrap report can
+        # show beside a verdict that may still be SAFE (network shares).
+        "durability_notes": sorted(set(getattr(result, "flush_failures", {}).values())),
         # Per-file hash table: this is where requested extra checksums
         # (sha256/md5/sha1/c4) actually ship — manifests seal xxh64 only.
         "files": [
@@ -695,6 +716,12 @@ def validate_receipt_dict(d, filepath="<memory>"):
     for index, error in enumerate(errors):
         _validate_text(error, f"errors[{index}]")
 
+    notes = d.get("durability_notes", [])
+    if not isinstance(notes, list) or len(notes) > MAX_ERRORS_PER_RECEIPT:
+        raise ValueError(f"Malformed receipt '{filepath}': invalid 'durability_notes' list")
+    for index, note in enumerate(notes):
+        _validate_text(note, f"durability_notes[{index}]")
+
     return d
 
 
@@ -864,6 +891,8 @@ def build_wrap_report(receipts, title=None):
         nocache = ("write=" + _attestation_text(att, "write_fd_nocache")
                    + ", verify=" + _attestation_text(att, "verify_fd_nocache"))
         flush = _attestation_text(att, "full_flush_before_close")
+        if flush == "false" and r.get("durability_notes"):
+            flush += ": " + "; ".join(r["durability_notes"])
         copies_devs = _copies_devices_text(att, labeled=True)
         reread = (f"passes={_attestation_text(att, 'source_read_count')}, "
                   f"consistent={_attestation_text(att, 'source_reread_consistent')}")
