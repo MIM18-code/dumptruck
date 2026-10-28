@@ -389,7 +389,9 @@ def build_report(result, att, card_info, media_info, dataset=None):
  else '<span class="warn">DEGRADED — F_NOCACHE failed on at least one descriptor; some verify reads may have been cache-served</span>'}</td></tr>
 <tr><td>Durability</td><td>{'F_FULLFSYNC succeeded per file before close'
  if att['full_flush_before_close']
- else '<span class="warn">DEGRADED — full flush-to-media failed on at least one file (plain fsync fallback)</span>'}</td></tr>
+ else '<span class="warn">DEGRADED — full flush-to-media failed on at least one file (plain fsync fallback)'
+ + ''.join(f'<br>{_esc(r)}' for r in sorted(set(getattr(result, 'flush_failures', {}).values())))
+ + '</span>'}</td></tr>
 <tr><td>Verified copies / physical devices</td><td>{_copies_devices_text(att)}</td></tr>
 <tr><td>Codec/media validation</td><td class="warn">NOT PERFORMED — copy integrity only</td></tr>
 </table>

@@ -114,6 +114,8 @@ class OffloadResult:
     trusted_prior_files: int = 0
     io_nocache_all: bool = True   # every write fd got F_NOCACHE(_EXT)
     io_flush_all: bool = True     # every write fd got F_FULLFSYNC
+    # {card_root: why it could not flush to media}, for the operator only.
+    flush_failures: dict = field(default_factory=dict)
     io_verify_nocache_all: bool = True
     source_grew_after_scan: bool = False  # new files appeared mid-job
     uncopied_source_objects: int = 0      # symlinks etc. deliberately not copied
@@ -233,7 +235,9 @@ class OffloadResult:
         if not self.io_verify_nocache_all:
             blockers.append("cache bypass failed on at least one destination verify read")
         if not self.io_flush_all:
-            blockers.append("full flush-to-media failed on at least one destination file")
+            reasons = "; ".join(sorted(set(self.flush_failures.values())))
+            blockers.append("full flush-to-media failed on at least one destination file"
+                            + (f" ({reasons})" if reasons else ""))
         if self.source_grew_after_scan:
             blockers.append("source tree changed after the initial scan")
         if self.uncopied_source_objects:
@@ -612,6 +616,7 @@ class _DestWriter(threading.Thread):
         self.leaf_fd = None        # ownership passes to the verify task on success
         self.nocache_ok = False
         self.flush_ok = False
+        self.flush_failure = None  # operator-facing reason when flush_ok is False
 
     def _write_all(self, fd, chunk):
         mv = memoryview(chunk)
@@ -654,7 +659,11 @@ class _DestWriter(threading.Thread):
                     break
                 self._write_all(fd, item)
                 written += len(item)
-            self.flush_ok = macio.full_fsync(fd)
+            flush_err = macio.full_fsync_error(fd)
+            self.flush_ok = flush_err is None
+            if not self.flush_ok:
+                self.flush_failure = macio.flush_failure_text(
+                    flush_err, macio.describe_volume(fd))
             os.close(fd)
             fd = None
             os.utime(self.tmp_name, ns=(self.entry.mtime_ns, self.entry.mtime_ns),
@@ -817,6 +826,7 @@ def _copy_one(source_file, entry, dest_specs, hash_formats, progress,
     flags = {
         "writers_nocache": all(w.nocache_ok for w in live) if live else True,
         "writers_flush": all(w.flush_ok for w in live) if live else True,
+        "flush_failures": {w.dest_file: w.flush_failure for w in live if not w.flush_ok},
     }
     staged = {w.dest_file: (w.error, w.tmp_name, w.leaf_fd) for w in writers}
     return hashes, staged, source_error, flags
@@ -968,6 +978,9 @@ def _preserve_camera_history(src_history, card_root, root_fd, result,
             if macio.IS_MACOS:
                 result.io_nocache_all &= flags["writers_nocache"]
                 result.io_flush_all &= flags["writers_flush"]
+                reason = flags.get("flush_failures", {}).get(os.path.join(card_root, dest_rel))
+                if reason:
+                    result.flush_failures.setdefault(card_root, reason)
             err, tmp, staged_leaf = staged[os.path.join(card_root, dest_rel)]
             if source_error is not None or err is not None:
                 raise RuntimeError(
@@ -1593,12 +1606,16 @@ class _VerifyCommitWorker(threading.Thread):
         flush the directory. Returns None on success, the error otherwise."""
         try:
             _commit_noreplace(task["leaf_fd"], task["tmp"], task["final"])
-            if not macio.full_fsync(task["leaf_fd"]):
+            flush_err = macio.full_fsync_error(task["leaf_fd"])
+            if flush_err is not None:
                 # The rename itself is not durably on media: a power cut can
                 # roll the committed name back even though the file data
                 # flushed. That must degrade the flush attestation, not pass.
+                reason = macio.flush_failure_text(
+                    flush_err, macio.describe_volume(task["leaf_fd"]))
                 with self.lock:
                     self.result.io_flush_all = False
+                    self.result.flush_failures.setdefault(task["cr"], reason)
             return None
         except FileExistsError:
             return FileExistsError(
@@ -1815,6 +1832,9 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
             if macio.IS_MACOS and to_write:
                 result.io_nocache_all &= io_flags["writers_nocache"]
                 result.io_flush_all &= io_flags["writers_flush"]
+                for cr, df in to_write.items():
+                    if df in io_flags.get("flush_failures", {}):
+                        result.flush_failures.setdefault(cr, io_flags["flush_failures"][df])
             if source_error is not None:
                 fr.errors.append(f"source read failed: {source_error}")
                 result.errors.append(f"{entry.rel_path}: source read failed: {source_error}")

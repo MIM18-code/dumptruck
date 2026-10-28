@@ -1065,6 +1065,63 @@ def scenario_case_sensitive_destinations(base):
                                    capture_output=True, text=True, timeout=60, check=True)
 
 
+def scenario_flush_failure_names_the_volume(base):
+    """[100] Field report 2026-10-27 (0.5.11, tester riggieri): three cards to
+    /Volumes/FOLIAGE said DEGRADED flush with no clue which drive or why.
+    F_FULLFSYNC fails on network volumes (measured: ENOTTY on WebDAV). The
+    verdict stays withheld; the blocker and the report now name the volume."""
+    import errno as _errno
+    print("[100] a failed flush-to-media names the destination volume and why")
+    src100 = os.path.join(base, "CARD100")
+    dst100 = os.path.join(base, "D100")
+    os.makedirs(dst100)
+    make_card(src100, {"CS7357.wav": 4096, "CS7358.wav": 2048})
+
+    fd100 = os.open(dst100, os.O_RDONLY)
+    try:
+        vol100 = engine.macio.describe_volume(fd100)
+    finally:
+        os.close(fd100)
+    check("describe_volume reads a real local volume (statfs layout is right)",
+          not engine.macio.IS_MACOS
+          or (vol100 is not None and vol100[2] is True and vol100[1] in ("apfs", "hfs")
+              and os.stat(vol100[0]).st_dev == os.stat(dst100).st_dev),
+          str(vol100))
+
+    real_err, real_desc = engine.macio.full_fsync_error, engine.macio.describe_volume
+    try:
+        engine.macio.full_fsync_error = lambda fd: _errno.ENOTTY
+        engine.macio.describe_volume = lambda fd: ("/Volumes/FOLIAGE", "smbfs", False)
+        res100 = engine.offload(src100, [dst100], label="SR100")
+    finally:
+        engine.macio.full_fsync_error, engine.macio.describe_volume = real_err, real_desc
+    att100 = res100.attestation()
+    blockers100 = att100["safe_to_wipe_blockers"]
+    flush100 = [b for b in blockers100 if b.startswith(
+        "full flush-to-media failed on at least one destination file")]
+    check("the flush failure still degrades the attestation and blocks the wipe",
+          not att100["full_flush_before_close"] and not att100["safe_to_wipe_source"]
+          and len(flush100) == 1, str(blockers100))
+    check("the blocker names the volume, its filesystem and the error",
+          flush100 and "/Volumes/FOLIAGE is a network volume (smbfs)" in flush100[0]
+          and "ENOTTY" in flush100[0], str(flush100))
+    check("the reason is recorded against the card folder that failed",
+          list(res100.flush_failures) == [os.path.join(dst100, "SR100")],
+          str(res100.flush_failures))
+    doc100, _ = report.build_report(res100, att100, SimpleNamespace(format_name="Generic"), {})
+    check("the report's Durability row carries the reason",
+          "DEGRADED" in doc100 and "/Volumes/FOLIAGE is a network volume (smbfs)" in doc100)
+
+    dst100b = os.path.join(base, "D100B")
+    os.makedirs(dst100b)
+    res100b = engine.offload(src100, [dst100b], label="SR100B")
+    att100b = res100b.attestation()
+    check("a clean flush records no reason and no flush blocker",
+          att100b["full_flush_before_close"] and not res100b.flush_failures
+          and not any("flush-to-media" in b for b in att100b["safe_to_wipe_blockers"]),
+          str(att100b["safe_to_wipe_blockers"]))
+
+
 def main():
     # realpath: the engine pins destinations to REAL paths (macOS /var -> /private/var)
     base = os.path.realpath(tempfile.mkdtemp(prefix="dumptruck-adversarial-"))
@@ -3388,6 +3445,7 @@ except OSError:
     scenario_source_reread_after_drain(base)
     scenario_verify_heartbeat(base)
     scenario_source_watcher_junk_matches_engine()
+    scenario_flush_failure_names_the_volume(base)
 
     print("[87] a failed completion callback cannot strand a per-file reader")
     src86, dst86 = os.path.join(base, "CARD86"), os.path.join(base, "D86")
