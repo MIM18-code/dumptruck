@@ -116,6 +116,11 @@ class OffloadResult:
     io_flush_all: bool = True     # every write fd got F_FULLFSYNC
     # {card_root: why it could not flush to media}, for the operator only.
     flush_failures: dict = field(default_factory=dict)
+    # {card_root: "FOLIAGE (SMB)"} for destinations on network shares, read
+    # during the pinned lifetime. Shares earn zero independence through
+    # physical_stores_by_root; attestation() excuses a share's unconfirmed
+    # flush only when that holds, since its copy then never counts.
+    network_roots: dict = field(default_factory=dict)
     io_verify_nocache_all: bool = True
     source_grew_after_scan: bool = False  # new files appeared mid-job
     uncopied_source_objects: int = 0      # symlinks etc. deliberately not copied
@@ -199,6 +204,16 @@ class OffloadResult:
             keep.append(merged)
             groups = keep
         devices = groups
+        # A share never confirms a flush, and its copy never counts toward
+        # the wipe, so its unconfirmed flush cannot block one either. A
+        # failure with no recorded root stays fatal (fail closed).
+        uncounted_shares = {
+            cr for cr in self.network_roots
+            if self.physical_stores_by_root.get(cr, macio.UNKNOWN_DEVICE)
+            == macio.UNKNOWN_DEVICE}
+        flush_ok = self.io_flush_all or (
+            bool(self.flush_failures)
+            and set(self.flush_failures) <= uncounted_shares)
         # Wipe authorization demands MAXIMUM evidence (coverage-audit gaps):
         # a consistent SECOND source read, honest cache/flush syscalls, a
         # source tree that did not grow after scanning, and 2+ real devices.
@@ -207,7 +222,7 @@ class OffloadResult:
             and len(devices) >= 2
             and self.source_reread_ok is True
             and self.io_nocache_all
-            and self.io_flush_all
+            and flush_ok
             and self.io_verify_nocache_all
             and not self.source_grew_after_scan
             and self.uncopied_source_objects == 0
@@ -220,11 +235,20 @@ class OffloadResult:
             blockers.append("loose files: the originals are not a card, nothing to wipe")
         if not self.fully_verified:
             blockers.append("copy is not fully verified")
+        shares = sorted({self.network_roots[cr] for cr in verified_roots
+                         if cr in self.network_roots})
         if len(devices) < 2:
             if not verified_roots and self.trusted_prior_files:
                 # Nothing was fully read: say that, not "0 devices", which
                 # reads as unknown topology (round-3 fix review, R3-06-B).
                 blockers.append("no destination copy was fully read this run")
+            elif shares:
+                # A DIT copying to the post house NAS read "0 physical
+                # devices" as a bug (field report 2026-10-27).
+                blockers.append(
+                    "SAFE TO WIPE needs verified copies on 2 separate local drives; "
+                    f"this run has {len(devices)}. Copies on network shares don't "
+                    f"count: {', '.join(shares)}")
             else:
                 blockers.append(
                     f"copies span only {len(devices)} known physical device(s); 2+ required")
@@ -234,7 +258,7 @@ class OffloadResult:
             blockers.append("cache bypass failed on at least one destination write")
         if not self.io_verify_nocache_all:
             blockers.append("cache bypass failed on at least one destination verify read")
-        if not self.io_flush_all:
+        if not flush_ok:
             reasons = "; ".join(sorted(set(self.flush_failures.values())))
             blockers.append("full flush-to-media failed on at least one destination file"
                             + (f" ({reasons})" if reasons else ""))
@@ -1318,6 +1342,9 @@ def offload(
                 if _pinned_now(cr):
                     stores = probed
             result.physical_stores_by_root[cr] = stores
+            volume = macio.describe_volume(root_fds[cr])
+            if volume is not None and not volume[2]:
+                result.network_roots[cr] = macio.share_label(volume)
         result.verify_schedule = _verify_schedule(
             card_roots, result.physical_stores_by_root)
         verify_admission = _VerifyAdmissionGovernor(
