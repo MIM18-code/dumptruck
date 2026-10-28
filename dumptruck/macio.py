@@ -56,15 +56,71 @@ def setup_verify_fd(fd) -> bool:
 
 def full_fsync(fd) -> bool:
     """True only when the full flush-to-media primitive succeeded."""
-    if IS_MACOS and _set(fd, fcntl.F_FULLFSYNC, 0):
-        return True
+    return full_fsync_error(fd) is None
+
+
+def full_fsync_error(fd):
+    """None when F_FULLFSYNC reached media, else the errno it failed with.
+    A failure still runs plain fsync() so the bytes get as far as they can.
+    Network volumes (SMB, WebDAV) refuse F_FULLFSYNC outright: measured
+    ENOTTY on a WebDAV mount, where fsync() still succeeds."""
+    import errno
     import os
 
+    err = errno.ENOTSUP
+    if IS_MACOS:
+        try:
+            fcntl.fcntl(fd, fcntl.F_FULLFSYNC, 0)
+            return None
+        except OSError as e:
+            err = e.errno
     try:
         os.fsync(fd)
     except OSError:
         pass
-    return False
+    return err
+
+
+MNT_LOCAL = 0x00001000
+
+
+def describe_volume(fd):
+    """(mount point, filesystem type, is_local) for the volume holding fd, or
+    None. Display only: it explains a degraded attestation to the operator and
+    must never feed a safety decision."""
+    if not IS_MACOS:
+        return None
+    try:
+        import ctypes
+        import platform
+
+        class _Statfs(ctypes.Structure):
+            # struct statfs, 64-bit inode layout (sys/mount.h).
+            _fields_ = [
+                ("f_bsize", ctypes.c_uint32), ("f_iosize", ctypes.c_int32),
+                ("f_blocks", ctypes.c_uint64), ("f_bfree", ctypes.c_uint64),
+                ("f_bavail", ctypes.c_uint64), ("f_files", ctypes.c_uint64),
+                ("f_ffree", ctypes.c_uint64), ("f_fsid", ctypes.c_int32 * 2),
+                ("f_owner", ctypes.c_uint32), ("f_type", ctypes.c_uint32),
+                ("f_flags", ctypes.c_uint32), ("f_fssubtype", ctypes.c_uint32),
+                ("f_fstypename", ctypes.c_char * 16),
+                ("f_mntonname", ctypes.c_char * 1024),
+                ("f_mntfromname", ctypes.c_char * 1024),
+                ("f_flags_ext", ctypes.c_uint32), ("f_reserved", ctypes.c_uint32 * 7),
+            ]
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        name = "fstatfs$INODE64" if platform.machine() == "x86_64" else "fstatfs"
+        fn = getattr(libc, name)
+        fn.argtypes = [ctypes.c_int, ctypes.POINTER(_Statfs)]
+        st = _Statfs()
+        if fn(fd, ctypes.byref(st)) != 0:
+            return None
+        return (st.f_mntonname.decode("utf-8", "replace"),
+                st.f_fstypename.decode("utf-8", "replace"),
+                bool(st.f_flags & MNT_LOCAL))
+    except Exception:  # noqa: BLE001 — a description must never break a copy
+        return None
 
 
 def fsync_dir(path) -> bool:
@@ -79,6 +135,21 @@ def fsync_dir(path) -> bool:
         return full_fsync(fd)
     finally:
         os.close(fd)
+
+
+def flush_failure_text(err, volume):
+    """Operator-facing reason a destination could not flush to media."""
+    import errno as _errno
+
+    code = _errno.errorcode.get(err, str(err))
+    if volume is None:
+        return f"F_FULLFSYNC failed ({code}); plain fsync was used"
+    mount, fstype, local = volume
+    if not local and err in (_errno.ENOTTY, _errno.ENOTSUP):
+        return (f"{mount} is a network volume ({fstype}) that does not support "
+                f"F_FULLFSYNC ({code}); plain fsync was used")
+    where = "network" if not local else "local"
+    return f"{mount} ({fstype}, {where}) rejected F_FULLFSYNC ({code}); plain fsync was used"
 
 
 _device_cache: dict = {}
