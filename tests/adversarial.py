@@ -1199,7 +1199,7 @@ def scenario_flush_failure_names_the_volume(base):
     check("a share served from this Mac never counts as a second drive",
           not att["safe_to_wipe_source"] and att["distinct_physical_devices"] == 1
           and not r.counted_shares
-          and any("LOOP (SMB) doesn't count: a network share counts as a drive only when" in b
+          and any("LOOP (SMB) doesn't count: it is on this Mac, or Dumptruck couldn't confirm" in b
                   for b in att["safe_to_wipe_blockers"])
           and "network share, not counted as a drive: LOOP (SMB)" in doc,
           str(att["safe_to_wipe_blockers"]))
@@ -1250,12 +1250,99 @@ def scenario_flush_failure_names_the_volume(base):
     check("an IP share counts only when bind() says EADDRNOTAVAIL; other errors fail closed",
           ip_eperm and not ip_remote, str((ip_eperm, ip_remote)))
     r, att, doc, _ = _run({"RAID": local_a, "NAMED": dict(nas, vol=named)})
-    check("a NAS mounted by name doesn't count, and the blocker says to connect by IP",
+    check("a NAS mounted by name with no readable connection doesn't count, and says why",
           not att["safe_to_wipe_source"] and not r.counted_shares
-          and any("connected by IP address (Go > Connect to Server, smb://192.168.x.x)" in b
+          and any("connecting by IP address (Go > Connect to Server, smb://192.168.x.x)" in b
                   for b in att["safe_to_wipe_blockers"])
           and "network share, not counted as a drive: NAMED (SMB)" in doc,
           str(att["safe_to_wipe_blockers"]))
+
+    # 0.5.15: an SMB mount is judged by the server address its own connection
+    # uses, read from `smbutil multichannel -m <mount> -x -f json`. The JSON
+    # below is the real output for a share of this Mac mounted as localhost
+    # (Samba 4.25.1 on port 1445, 2026-10-28), with the mount path shortened.
+    import subprocess as _sp
+    real_json = (
+        '{\n  "\\/Volumes\\/FOLIAGE" : {\n    "multi_channel_status" : {\n'
+        '      "0" : {\n        "flags" : [\n          "main"\n        ],\n'
+        '        "iod_id" : "0",\n        "port" : "1445",\n'
+        '        "server_inet" : "127.0.0.1",\n'
+        '        "session_setup_time" : "2026-10-28 00:31:37",\n'
+        '        "state" : "session active"\n      }\n    }\n  }\n}\n')
+    real_run = _sp.run
+
+    def smbutil_says(stdout, rc=0):
+        _sp.run = lambda *a, **k: SimpleNamespace(returncode=rc, stdout=stdout, stderr="")
+        try:
+            return engine.macio.smb_server_addresses("/Volumes/FOLIAGE")
+        finally:
+            _sp.run = real_run
+    parsed = {
+        "real output": smbutil_says(real_json),
+        "foreign server": smbutil_says(real_json.replace("127.0.0.1", "192.0.2.44")),
+        "bracketed IPv6": smbutil_says(real_json.replace("127.0.0.1", "[2001:db8::5]")),
+        "other mount's entry": smbutil_says(real_json.replace("FOLIAGE", "OTHER")),
+        "smbutil error": smbutil_says("{\n\n}", rc=64),
+        "not JSON": smbutil_says("smbutil: Invalid parameter"),
+        "no server_inet": smbutil_says(real_json.replace('"server_inet"', '"server_x"')),
+        "no channels": smbutil_says('{"/Volumes/FOLIAGE": {"multi_channel_status": {}}}'),
+    }
+    check("smbutil output parses to this mount's server addresses; anything odd is unknown",
+          parsed == {"real output": {"127.0.0.1"}, "foreign server": {"192.0.2.44"},
+                     "bracketed IPv6": {"2001:db8::5"}, "other mount's entry": None,
+                     "smbutil error": None, "not JSON": None, "no server_inet": None,
+                     "no channels": None}, str(parsed))
+
+    real_smb = engine.macio.smb_server_addresses
+    named_smb = dict(nas, vol=("/Volumes/FOLIAGE", "smbfs", False,
+                               "//dit@foliage-nas._smb._tcp.local/OCM"))
+    two_channels = {"192.0.2.44", "127.0.0.1"}
+    outcomes = {}
+    try:
+        for name, answer in (("NAS by name, connected elsewhere", {"192.0.2.44"}),
+                             ("NAS by name, connected to this Mac", {"127.0.0.1"}),
+                             ("one of two channels is this Mac", two_channels),
+                             ("smbutil unreadable, mounted by name", None)):
+            engine.macio.smb_server_addresses = lambda mount, a=answer: a
+            r, att, _doc, _ = _run({"RAID": local_a, "NAS": named_smb})
+            outcomes[name] = att["safe_to_wipe_source"]
+        engine.macio.smb_server_addresses = lambda mount: None
+        r, att, _doc, _ = _run({"RAID": local_a, "NAS": nas})
+        outcomes["smbutil unreadable, mounted by foreign IP"] = att["safe_to_wipe_source"]
+    finally:
+        engine.macio.smb_server_addresses = real_smb
+    check("a NAS from Finder's sidebar counts when its own connection goes elsewhere",
+          outcomes == {"NAS by name, connected elsewhere": True,
+                       "NAS by name, connected to this Mac": False,
+                       "one of two channels is this Mac": False,
+                       "smbutil unreadable, mounted by name": False,
+                       "smbutil unreadable, mounted by foreign IP": True}, str(outcomes))
+
+    # S1 (Sol, round 11): smbutil reports IPv6 link-local addresses without
+    # their interface, and an unscoped bind of this Mac's own fe80:: address
+    # fails with EADDRNOTAVAIL, the "another machine" answer. Real addresses
+    # of this Mac, no stubs.
+    own_ll = sorted(set(re.findall(r"inet6 (fe80:[0-9a-f:]+)",
+                                   subprocess.run(["ifconfig"], capture_output=True,
+                                                  text=True).stdout)))
+    ll_answers = {a: engine.macio._ip_is_this_mac(a) for a in own_ll}
+    check("this Mac's own link-local addresses never read as another machine",
+          own_ll and all(ll_answers.values())
+          and engine.macio._ip_is_this_mac("fe80::dead:beef:1234:5678") is False,
+          str(ll_answers))
+
+    flips = [0]
+
+    def flipping(mount):
+        flips[0] += 1
+        return {"192.0.2.44"} if flips[0] == 1 else {"127.0.0.1"}
+    try:
+        engine.macio.smb_server_addresses = flipping
+        r, att, _doc, _ = _run({"RAID": local_a, "NAS": named_smb})
+    finally:
+        engine.macio.smb_server_addresses = real_smb
+    check("an SMB mount whose connection moves to this Mac mid-job stops counting",
+          not att["safe_to_wipe_source"] and r.revoked_shares, str(att["safe_to_wipe_blockers"]))
 
     # S11 (Sol): a share's address can vanish at pin time (interface flap)
     # and return for the copy. The share is re-checked during and after the

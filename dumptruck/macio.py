@@ -200,6 +200,26 @@ def _ip_is_this_mac(addr):
         return True
     if ip.is_loopback or ip.is_unspecified:
         return True
+    if ip.version == 6 and ip.is_link_local:
+        # smbutil drops the interface scope, and an unscoped bind of this
+        # Mac's own link-local address fails with EADDRNOTAVAIL. Try it on
+        # every interface; it is remote only if no interface owns it.
+        try:
+            scopes = [index for index, _name in socket.if_nameindex()]
+        except OSError:
+            return True
+        if not scopes:
+            return True
+        bare = str(ip).split("%")[0]
+        for scope in scopes:
+            try:
+                with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as sock:
+                    sock.bind((bare, 0, 0, scope))
+                return True
+            except OSError as e:
+                if e.errno != errno.EADDRNOTAVAIL:
+                    return True
+        return False
     family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
     try:
         with socket.socket(family, socket.SOCK_DGRAM) as sock:
@@ -209,13 +229,51 @@ def _ip_is_this_mac(addr):
         return e.errno != errno.EADDRNOTAVAIL
 
 
+def smb_server_addresses(mount):
+    """The server addresses the SMB share mounted at `mount` is actually
+    connected to, one per channel, as macOS reports them; None when that
+    can't be read for certain. Unlike the name in the mount source, this is
+    the live connection of this one mount."""
+    import json
+    import subprocess
+
+    try:
+        out = subprocess.run(["smbutil", "multichannel", "-m", mount, "-x", "-f", "json"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        data = json.loads(out.stdout)
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or list(data) != [mount]:
+        return None
+    channels = data[mount].get("multi_channel_status") if isinstance(data[mount], dict) else None
+    if not isinstance(channels, dict) or not channels:
+        return None
+    addrs = set()
+    for channel in channels.values():
+        addr = channel.get("server_inet") if isinstance(channel, dict) else None
+        if not isinstance(addr, str) or not addr.strip():
+            return None
+        addrs.add(addr.strip().strip("[]"))
+    return addrs
+
+
 def share_on_this_mac(volume):
-    """True unless the share is mounted by an IP address that provably isn't
-    this Mac's. A name (DNS alias, Bonjour) is never proof: it can point back
-    to this Mac, and whether it does can change mid-job as this Mac's own file
-    server stops and starts (Sol rounds 2-5). An address answers for itself."""
+    """True unless the share provably lives on another machine. An SMB mount
+    is judged by the server address its own connection uses (smbutil); any
+    other share, or an SMB mount whose connection can't be read, only by an
+    IP literal in its mount source. A name alone is never proof: it can point
+    back to this Mac (Sol rounds 2-5). Everything else fails closed."""
     import ipaddress
 
+    if volume[1] == "smbfs":
+        addrs = smb_server_addresses(volume[0])
+        if addrs:
+            return any(_ip_is_this_mac(addr) for addr in addrs)
     host, _port = share_endpoint(volume)
     if not host:
         return True

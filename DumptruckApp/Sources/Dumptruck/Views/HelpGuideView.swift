@@ -40,11 +40,13 @@ struct HelpGuideView: View {
                     a backup. SAFE TO WIPE requires two separate physical \
                     devices, and two partitions on the same disk do not count. \
                     A network share (a NAS over SMB, for example) counts as \
-                    one drive once its copy is verified, if you connected to \
-                    it by IP address (Go > Connect to Server, \
-                    smb://192.168.x.x). A share picked by name from Finder's \
-                    sidebar doesn't count, because its name could point back \
-                    to this Mac. All network shares together count as one.
+                    one drive once its copy is verified, as long as it is \
+                    another machine. For SMB, Dumptruck checks which server \
+                    the share is actually connected to, so a NAS picked from \
+                    Finder's sidebar counts. A share of this Mac itself never \
+                    counts, and all network shares together count as one. \
+                    For other kinds of share, connect by IP address (Go > \
+                    Connect to Server) so Dumptruck can check.
 
                     3.  Name the card. The name becomes the folder on every \
                     destination, and that folder is where the card's future \
