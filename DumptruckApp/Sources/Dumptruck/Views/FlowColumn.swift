@@ -1342,6 +1342,14 @@ struct JobHeaderBand: View {
         return Int(Double(job.rereadTotal - job.rereadDone) / rate)
     }
 
+    /// A SAFE verdict with a NAS among the copies: the local drives flushed
+    /// to media, the share synced through its server (0.5.14).
+    private var flushProof: String {
+        job.mediaFlushConfirmed == false
+            ? "local drives flushed to media, network share synced by its server"
+            : "flushed to media"
+    }
+
     @ViewBuilder
     private var finishedBody: some View {
         // The verdict carries its proof (or its blockers) inline — the
@@ -1350,13 +1358,13 @@ struct JobHeaderBand: View {
         if job.verdict == .safeToWipe, job.destinationAuthorityWithdrawn != nil {
             // Historical proof, no mascot: the copies it describes are no
             // longer where the verdict left them.
-            Label("Historical: \(job.physicalDevices) physical \(job.physicalDevices == 1 ? "device" : "devices") · source read twice · flushed to media",
+            Label("Historical: \(job.physicalDevices) physical \(job.physicalDevices == 1 ? "device" : "devices") · source read twice · \(flushProof)",
                   systemImage: "clock.arrow.circlepath")
                 .font(Typo.safetyBody)
                 .foregroundStyle(.secondary)
         } else if job.verdict == .safeToWipe {
             HStack(alignment: .center, spacing: 8) {
-                Label("\(job.physicalDevices) physical \(job.physicalDevices == 1 ? "device" : "devices") · source read twice · flushed to media",
+                Label("\(job.physicalDevices) physical \(job.physicalDevices == 1 ? "device" : "devices") · source read twice · \(flushProof)",
                       systemImage: "checkmark.circle")
                     .font(Typo.safetyBody)
                     .foregroundStyle(Semantics.successText)

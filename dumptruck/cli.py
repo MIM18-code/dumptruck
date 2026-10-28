@@ -23,6 +23,16 @@ from . import PROTOCOL_VERSION, __version__, cards, engine, hasher, identity, ma
 from .ignore import is_junk
 
 
+def _flush_word(att):
+    """yes, a network share synced by its server (excused), or DEGRADED."""
+    if att["full_flush_before_close"]:
+        return "yes"
+    if not any(b.startswith("full flush-to-media failed")
+               for b in att.get("safe_to_wipe_blockers", [])):
+        return "network share synced by its server"
+    return "DEGRADED"
+
+
 def _human(n):
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":
@@ -546,7 +556,7 @@ def cmd_offload(args):
         print(f"Attestation: source reads={att['source_read_count']}, "
               f"destination readback={'yes' if att['destination_readback'] else 'NO'}, "
               f"cache-bypassed writes+verify={'yes' if att['write_fd_nocache'] and att['verify_fd_nocache'] else 'DEGRADED'}, "
-              f"flushed to media={'yes' if att['full_flush_before_close'] else 'DEGRADED'}, "
+              f"flushed to media={_flush_word(att)}, "
               f"codec validation=not performed{trusted_note}")
         if att["safe_to_wipe_source"] and ok:
             print(f"SAFE TO WIPE SOURCE: yes ({att['independently_verified_destinations']} verified "

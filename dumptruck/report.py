@@ -138,18 +138,31 @@ def _durability_html(result, att):
         return "F_FULLFSYNC succeeded per file before close"
     failures = getattr(result, "flush_failures", {})
     reasons = "".join(f"<br>{_esc(r)}" for r in sorted(set(failures.values())))
-    if failures and set(failures) <= set(getattr(result, "network_roots", {})):
+    if (failures and set(failures) <= set(getattr(result, "network_roots", {}))
+            and not getattr(result, "flush_hard_roots", set())):
         return reasons[len("<br>"):]
     return ('<span class="warn">DEGRADED — full flush-to-media failed on at least '
             f'one file (plain fsync fallback){reasons}</span>')
 
 
+def _share_lists(result):
+    shares = getattr(result, "network_roots", {})
+    counted = getattr(result, "counted_shares", set())
+    return {"counted": sorted({v for k, v in shares.items() if k in counted}),
+            "not_counted": sorted({v for k, v in shares.items() if k not in counted})}
+
+
 def _share_note(result):
     shares = getattr(result, "network_roots", {})
-    if not shares:
-        return ""
-    names = ", ".join(sorted(set(shares.values())))
-    return _esc(f" (network share, not counted as a drive: {names})")
+    counted = getattr(result, "counted_shares", set())
+    notes = []
+    names = sorted({label for cr, label in shares.items() if cr in counted})
+    if names:
+        notes.append("network share, counts as one drive: " + ", ".join(names))
+    names = sorted({label for cr, label in shares.items() if cr not in counted})
+    if names:
+        notes.append("network share, not counted as a drive: " + ", ".join(names))
+    return _esc(f" ({'; '.join(notes)})") if notes else ""
 
 
 def _attestation_text(attestation, field):
@@ -463,6 +476,8 @@ def build_report(result, att, card_info, media_info, dataset=None):
         # Why full_flush_before_close is false, in words a wrap report can
         # show beside a verdict that may still be SAFE (network shares).
         "durability_notes": sorted(set(getattr(result, "flush_failures", {}).values())),
+        # Which network shares counted as the one shared drive (0.5.14).
+        "network_shares": _share_lists(result),
         # Per-file hash table: this is where requested extra checksums
         # (sha256/md5/sha1/c4) actually ship — manifests seal xxh64 only.
         "files": [
@@ -716,6 +731,15 @@ def validate_receipt_dict(d, filepath="<memory>"):
     for index, error in enumerate(errors):
         _validate_text(error, f"errors[{index}]")
 
+    shares = d.get("network_shares", {})
+    if not isinstance(shares, dict) or set(shares) - {"counted", "not_counted"}:
+        raise ValueError(f"Malformed receipt '{filepath}': invalid 'network_shares'")
+    for key, labels in shares.items():
+        if not isinstance(labels, list) or len(labels) > MAX_ERRORS_PER_RECEIPT:
+            raise ValueError(f"Malformed receipt '{filepath}': invalid 'network_shares.{key}'")
+        for index, label in enumerate(labels):
+            _validate_text(label, f"network_shares.{key}[{index}]")
+
     notes = d.get("durability_notes", [])
     if not isinstance(notes, list) or len(notes) > MAX_ERRORS_PER_RECEIPT:
         raise ValueError(f"Malformed receipt '{filepath}': invalid 'durability_notes' list")
@@ -894,6 +918,11 @@ def build_wrap_report(receipts, title=None):
         if flush == "false" and r.get("durability_notes"):
             flush += ": " + "; ".join(r["durability_notes"])
         copies_devs = _copies_devices_text(att, labeled=True)
+        shares = r.get("network_shares") or {}
+        if shares.get("counted"):
+            copies_devs += " (network share, counts as one drive: " + ", ".join(shares["counted"]) + ")"
+        if shares.get("not_counted"):
+            copies_devs += " (network share, not counted: " + ", ".join(shares["not_counted"]) + ")"
         reread = (f"passes={_attestation_text(att, 'source_read_count')}, "
                   f"consistent={_attestation_text(att, 'source_reread_consistent')}")
         blockers_value = att.get("safe_to_wipe_blockers")

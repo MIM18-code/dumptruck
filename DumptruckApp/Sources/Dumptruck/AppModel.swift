@@ -2618,6 +2618,7 @@ final class AppModel: ObservableObject {
         job.fullyVerified = interrupted ? false : record.fullyVerified
         job.safeToWipe = interrupted ? false : record.safeToWipe
         job.physicalDevices = record.physicalDevices
+        job.mediaFlushConfirmed = record.mediaFlushConfirmed
         job.wipeBlockers = record.wipeBlockers
         job.reportPath = record.reportPath
         job.reportFailed = record.reportFailed
@@ -4215,6 +4216,7 @@ final class AppModel: ObservableObject {
                 return false
             }
             job.physicalDevices = obj["distinct_physical_devices"] as? Int ?? 0
+            job.mediaFlushConfirmed = obj["full_flush_before_close"] as? Bool
             job.trustedPrior = obj["files_trusted_from_prior_generations"] as? Int ?? 0
         case "manifests_written":
             guard let paths = obj["paths"] as? [String],

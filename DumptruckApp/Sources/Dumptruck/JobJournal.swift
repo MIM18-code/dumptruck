@@ -69,6 +69,8 @@ struct JobJournalRecord: Codable, Identifiable, Hashable {
     let fullyVerified: Bool
     let safeToWipe: Bool
     let physicalDevices: Int
+    /// Optional and additive: journals written before it decode unchanged.
+    let mediaFlushConfirmed: Bool?
     let wipeBlockers: [String]
     let messages: [JournalMessage]
     let reportPath: String?
@@ -115,6 +117,7 @@ struct JobJournalRecord: Codable, Identifiable, Hashable {
         fullyVerified = job.fullyVerified
         safeToWipe = job.safeToWipe
         physicalDevices = job.physicalDevices
+        mediaFlushConfirmed = job.mediaFlushConfirmed
         wipeBlockers = job.wipeBlockers
         messages = job.messages.map {
             JournalMessage(severity: $0.severity == .error ? "error" : "warning",

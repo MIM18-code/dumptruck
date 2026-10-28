@@ -98,6 +98,64 @@ class FileResult:
         return "verified"
 
 
+class _ShareWatch(threading.Thread):
+    """Re-checks every counted share while the job runs. A share mounted by an
+    IP address counts only while that address belongs to another machine; if
+    it ever answers as this Mac's (an interface flap can hide a self-mount at
+    pin time, Sol S11), or the mount changes, the share stops counting."""
+
+    INTERVAL_S = 2.0
+
+    def __init__(self, volumes):
+        super().__init__(daemon=True, name="dumptruck-share-watch")
+        self.volumes = dict(volumes)  # {card_root: describe_volume() at pin time}
+        self.revoked = set()
+        self._halt = threading.Event()
+
+    def _check(self):
+        for cr, vol in self.volumes.items():
+            if cr not in self.revoked and macio.share_on_this_mac(vol):
+                self.revoked.add(cr)
+
+    def run(self):
+        while not self._halt.wait(self.INTERVAL_S):
+            self._check()
+
+    def begin(self):
+        if self.volumes:
+            self.start()
+
+    def halt(self):
+        self._halt.set()
+        if self.is_alive():
+            self.join()
+
+    def finish(self, root_fds):
+        """Stop watching, check once more through the pinned descriptors, and
+        return every card root that must not count."""
+        self.halt()
+        self._check()
+        for cr, vol in self.volumes.items():
+            if macio.describe_volume(root_fds[cr]) != vol:
+                self.revoked.add(cr)
+        return set(self.revoked)
+
+
+def _note_flush(result, card_root, reason, hard):
+    """Record why card_root could not flush to media. A failed plain fsync
+    outranks a share's routine "can't confirm" note, whichever came first."""
+    if hard:
+        result.flush_hard_roots.add(card_root)
+        result.flush_failures[card_root] = reason
+    elif card_root not in result.flush_hard_roots:
+        result.flush_failures.setdefault(card_root, reason)
+
+
+# Every counted network share maps to this one store: shares are one device
+# together, so two mounts of one NAS (or two NASes) never make two copies.
+NETWORK_SHARE_STORES = frozenset({"network-share"})
+
+
 @dataclass
 class OffloadResult:
     label: str
@@ -116,11 +174,19 @@ class OffloadResult:
     io_flush_all: bool = True     # every write fd got F_FULLFSYNC
     # {card_root: why it could not flush to media}, for the operator only.
     flush_failures: dict = field(default_factory=dict)
+    # Card roots whose flush failed even the plain fsync: never excused.
+    flush_hard_roots: set = field(default_factory=set)
     # {card_root: "FOLIAGE (SMB)"} for destinations on network shares, read
-    # during the pinned lifetime. Shares earn zero independence through
-    # physical_stores_by_root; attestation() excuses a share's unconfirmed
-    # flush only when that holds, since its copy then never counts.
+    # during the pinned lifetime.
     network_roots: dict = field(default_factory=dict)
+    # Network roots that count as a drive: diskutil could not resolve their
+    # disks and they are mounted by an IP address this Mac doesn't have. All
+    # of them TOGETHER count as one device (attestation), so one NAS mounted
+    # twice is never two copies.
+    counted_shares: set = field(default_factory=set)
+    # Counted shares withdrawn because their address answered as this Mac's
+    # (or their mount changed) at some point during the job.
+    revoked_shares: set = field(default_factory=set)
     io_verify_nocache_all: bool = True
     source_grew_after_scan: bool = False  # new files appeared mid-job
     uncopied_source_objects: int = 0      # symlinks etc. deliberately not copied
@@ -192,6 +258,11 @@ class OffloadResult:
             # attest whatever volume sits at the path NOW, not the one that
             # received the verified bytes. Missing snapshot = fail closed.
             stores = self.physical_stores_by_root.get(cr, macio.UNKNOWN_DEVICE)
+            if stores == macio.UNKNOWN_DEVICE and cr in self.counted_shares:
+                # A verified NAS copy is a backup, as every DIT tool treats it
+                # (field report 2026-10-27). Shares share one synthetic store,
+                # so all of them together are at most one device.
+                stores = NETWORK_SHARE_STORES
             if stores == macio.UNKNOWN_DEVICE or not stores:
                 continue  # unverifiable topology earns zero independence
             merged = set(stores)
@@ -204,16 +275,17 @@ class OffloadResult:
             keep.append(merged)
             groups = keep
         devices = groups
-        # A share never confirms a flush, and its copy never counts toward
-        # the wipe, so its unconfirmed flush cannot block one either. A
+        # A share never confirms F_FULLFSYNC; its plain fsync is the server
+        # flush request. So a share whose disks did not resolve is excused
+        # when that fsync succeeded. A local failure, a failed fsync, or a
         # failure with no recorded root stays fatal (fail closed).
-        uncounted_shares = {
+        excused_shares = {
             cr for cr in self.network_roots
             if self.physical_stores_by_root.get(cr, macio.UNKNOWN_DEVICE)
-            == macio.UNKNOWN_DEVICE}
+            == macio.UNKNOWN_DEVICE and cr not in self.flush_hard_roots}
         flush_ok = self.io_flush_all or (
             bool(self.flush_failures)
-            and set(self.flush_failures) <= uncounted_shares)
+            and set(self.flush_failures) <= excused_shares)
         # Wipe authorization demands MAXIMUM evidence (coverage-audit gaps):
         # a consistent SECOND source read, honest cache/flush syscalls, a
         # source tree that did not grow after scanning, and 2+ real devices.
@@ -235,20 +307,34 @@ class OffloadResult:
             blockers.append("loose files: the originals are not a card, nothing to wipe")
         if not self.fully_verified:
             blockers.append("copy is not fully verified")
-        shares = sorted({self.network_roots[cr] for cr in verified_roots
-                         if cr in self.network_roots})
+        revoked = sorted({self.network_roots[cr] for cr in verified_roots
+                          if cr in self.revoked_shares and cr in self.network_roots})
+        uncounted = sorted({self.network_roots[cr] for cr in verified_roots
+                            if cr in self.network_roots and cr not in self.counted_shares
+                            and cr not in self.revoked_shares})
+        counted = [cr for cr in verified_roots if cr in self.counted_shares]
         if len(devices) < 2:
             if not verified_roots and self.trusted_prior_files:
                 # Nothing was fully read: say that, not "0 devices", which
                 # reads as unknown topology (round-3 fix review, R3-06-B).
                 blockers.append("no destination copy was fully read this run")
-            elif shares:
-                # A DIT copying to the post house NAS read "0 physical
-                # devices" as a bug (field report 2026-10-27).
+            elif revoked:
                 blockers.append(
-                    "SAFE TO WIPE needs verified copies on 2 separate local drives; "
-                    f"this run has {len(devices)}. Copies on network shares don't "
-                    f"count: {', '.join(shares)}")
+                    f"SAFE TO WIPE needs verified copies on 2 separate drives; this run "
+                    f"has {len(devices)}. {', '.join(revoked)} stopped counting: its "
+                    "network address answered as this Mac's, or its connection changed, "
+                    "during the job")
+            elif uncounted:
+                blockers.append(
+                    f"SAFE TO WIPE needs verified copies on 2 separate drives; this run "
+                    f"has {len(devices)}. {', '.join(uncounted)} doesn't count: a network "
+                    "share counts as a drive only when it's connected by IP address "
+                    "(Go > Connect to Server, smb://192.168.x.x), so Dumptruck can "
+                    "confirm it's a different machine from this Mac")
+            elif len(counted) > 1:
+                blockers.append(
+                    f"copies span only {len(devices)} known physical device(s); 2+ "
+                    "required (network shares count as one drive together)")
             else:
                 blockers.append(
                     f"copies span only {len(devices)} known physical device(s); 2+ required")
@@ -641,6 +727,7 @@ class _DestWriter(threading.Thread):
         self.nocache_ok = False
         self.flush_ok = False
         self.flush_failure = None  # operator-facing reason when flush_ok is False
+        self.flush_hard = False    # even the plain fsync failed
 
     def _write_all(self, fd, chunk):
         mv = memoryview(chunk)
@@ -683,11 +770,12 @@ class _DestWriter(threading.Thread):
                     break
                 self._write_all(fd, item)
                 written += len(item)
-            flush_err = macio.full_fsync_error(fd)
+            flush_err, fsync_err = macio.flush_to_media(fd)
             self.flush_ok = flush_err is None
+            self.flush_hard = fsync_err is not None
             if not self.flush_ok:
                 self.flush_failure = macio.flush_failure_text(
-                    flush_err, macio.describe_volume(fd))
+                    flush_err, macio.describe_volume(fd), fsync_err)
             os.close(fd)
             fd = None
             os.utime(self.tmp_name, ns=(self.entry.mtime_ns, self.entry.mtime_ns),
@@ -851,6 +939,7 @@ def _copy_one(source_file, entry, dest_specs, hash_formats, progress,
         "writers_nocache": all(w.nocache_ok for w in live) if live else True,
         "writers_flush": all(w.flush_ok for w in live) if live else True,
         "flush_failures": {w.dest_file: w.flush_failure for w in live if not w.flush_ok},
+        "flush_hard": {w.dest_file for w in live if w.flush_hard},
     }
     staged = {w.dest_file: (w.error, w.tmp_name, w.leaf_fd) for w in writers}
     return hashes, staged, source_error, flags
@@ -1004,7 +1093,8 @@ def _preserve_camera_history(src_history, card_root, root_fd, result,
                 result.io_flush_all &= flags["writers_flush"]
                 reason = flags.get("flush_failures", {}).get(os.path.join(card_root, dest_rel))
                 if reason:
-                    result.flush_failures.setdefault(card_root, reason)
+                    _note_flush(result, card_root, reason,
+                                os.path.join(card_root, dest_rel) in flags.get("flush_hard", ()))
             err, tmp, staged_leaf = staged[os.path.join(card_root, dest_rel)]
             if source_error is not None or err is not None:
                 raise RuntimeError(
@@ -1012,7 +1102,13 @@ def _preserve_camera_history(src_history, card_root, root_fd, result,
             if _cold_hash(tmp, result, dir_fd=staged_leaf) != hashes["xxh64"]:
                 raise RuntimeError(f"camera history verify mismatch for {rel}")
             _commit_noreplace(staged_leaf, tmp, os.path.basename(dest_rel))
-            macio.full_fsync(staged_leaf)
+            full_err, sync_err = macio.flush_to_media(staged_leaf)
+            if full_err is not None:
+                # The committed name is not provably on media either.
+                result.io_flush_all = False
+                _note_flush(result, card_root, macio.flush_failure_text(
+                    full_err, macio.describe_volume(staged_leaf), sync_err),
+                    sync_err is not None)
             if _hist_hash(rel) != hashes["xxh64"]:
                 raise RuntimeError(f"camera history changed during preservation: {rel}")
             hist_hashes[rel] = hashes["xxh64"]
@@ -1335,6 +1431,7 @@ def offload(
                 return (pst.st_dev, pst.st_ino) == root_pins[cr]
             except OSError:
                 return False
+        share_volumes = {}
         for cr in card_roots:
             stores = macio.UNKNOWN_DEVICE
             if _pinned_now(cr):
@@ -1345,6 +1442,9 @@ def offload(
             volume = macio.describe_volume(root_fds[cr])
             if volume is not None and not volume[2]:
                 result.network_roots[cr] = macio.share_label(volume)
+                if stores == macio.UNKNOWN_DEVICE and not macio.share_on_this_mac(volume):
+                    result.counted_shares.add(cr)
+                    share_volumes[cr] = volume
         result.verify_schedule = _verify_schedule(
             card_roots, result.physical_stores_by_root)
         verify_admission = _VerifyAdmissionGovernor(
@@ -1386,16 +1486,24 @@ def offload(
                 pass
         raise
 
+    share_watch = _ShareWatch(share_volumes)
     try:
+        share_watch.begin()
         result = _offload_locked(source_root, result, card_roots, entries, hash_formats,
                                verify_mode, source_reread, reverify_existing, ev,
                                source_dirs, scan_warnings, root_fds, root_pins,
                                source_pin, early_camera_inventory, source_fd,
                                verify_admission, selection=selection)
+        # Still pinned: withdraw any share whose address turned local or whose
+        # mount changed at any point during the copy (Sol S11).
+        for cr in share_watch.finish(root_fds):
+            result.counted_shares.discard(cr)
+            result.revoked_shares.add(cr)
         # Manifests seal HERE — descriptors and job flocks still held.
         _seal_manifests(result, card_roots, root_fds, root_pins, ev)
         return result
     finally:
+        share_watch.halt()
         for lfd in job_locks:
             # Nested finally: a failing explicit unlock must never leak the
             # descriptor (closing releases the flock anyway; round-13).
@@ -1633,16 +1741,16 @@ class _VerifyCommitWorker(threading.Thread):
         flush the directory. Returns None on success, the error otherwise."""
         try:
             _commit_noreplace(task["leaf_fd"], task["tmp"], task["final"])
-            flush_err = macio.full_fsync_error(task["leaf_fd"])
+            flush_err, fsync_err = macio.flush_to_media(task["leaf_fd"])
             if flush_err is not None:
                 # The rename itself is not durably on media: a power cut can
                 # roll the committed name back even though the file data
                 # flushed. That must degrade the flush attestation, not pass.
                 reason = macio.flush_failure_text(
-                    flush_err, macio.describe_volume(task["leaf_fd"]))
+                    flush_err, macio.describe_volume(task["leaf_fd"]), fsync_err)
                 with self.lock:
                     self.result.io_flush_all = False
-                    self.result.flush_failures.setdefault(task["cr"], reason)
+                    _note_flush(self.result, task["cr"], reason, fsync_err is not None)
             return None
         except FileExistsError:
             return FileExistsError(
@@ -1861,7 +1969,8 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
                 result.io_flush_all &= io_flags["writers_flush"]
                 for cr, df in to_write.items():
                     if df in io_flags.get("flush_failures", {}):
-                        result.flush_failures.setdefault(cr, io_flags["flush_failures"][df])
+                        _note_flush(result, cr, io_flags["flush_failures"][df],
+                                    df in io_flags.get("flush_hard", ()))
             if source_error is not None:
                 fr.errors.append(f"source read failed: {source_error}")
                 result.errors.append(f"{entry.rel_path}: source read failed: {source_error}")
