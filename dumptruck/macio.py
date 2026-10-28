@@ -56,14 +56,15 @@ def setup_verify_fd(fd) -> bool:
 
 def full_fsync(fd) -> bool:
     """True only when the full flush-to-media primitive succeeded."""
-    return full_fsync_error(fd) is None
+    return flush_to_media(fd)[0] is None
 
 
-def full_fsync_error(fd):
-    """None when F_FULLFSYNC reached media, else the errno it failed with.
-    A failure still runs plain fsync() so the bytes get as far as they can.
-    Network volumes (SMB, WebDAV) refuse F_FULLFSYNC outright: measured
-    ENOTTY on a WebDAV mount, where fsync() still succeeds."""
+def flush_to_media(fd):
+    """(full_err, fsync_err). full_err is None when F_FULLFSYNC reached media,
+    else its errno; then plain fsync() runs so the bytes get as far as they
+    can, and fsync_err is its errno or None. Network volumes (SMB, WebDAV)
+    refuse F_FULLFSYNC outright (measured ENOTTY on WebDAV) while fsync()
+    succeeds: on SMB that fsync is the server flush request."""
     import errno
     import os
 
@@ -71,23 +72,23 @@ def full_fsync_error(fd):
     if IS_MACOS:
         try:
             fcntl.fcntl(fd, fcntl.F_FULLFSYNC, 0)
-            return None
+            return None, None
         except OSError as e:
             err = e.errno
     try:
         os.fsync(fd)
-    except OSError:
-        pass
-    return err
+    except OSError as e:
+        return err, e.errno
+    return err, None
 
 
 MNT_LOCAL = 0x00001000
 
 
 def describe_volume(fd):
-    """(mount point, filesystem type, is_local) for the volume holding fd, or
-    None. Display only: it explains a degraded attestation to the operator and
-    must never feed a safety decision."""
+    """(mount point, filesystem type, is_local, mounted-from) for the volume
+    holding fd, or None. Read during the pinned lifetime; the engine counts a
+    network share as a drive only through share_counts()."""
     if not IS_MACOS:
         return None
     try:
@@ -118,7 +119,8 @@ def describe_volume(fd):
             return None
         return (st.f_mntonname.decode("utf-8", "replace"),
                 st.f_fstypename.decode("utf-8", "replace"),
-                bool(st.f_flags & MNT_LOCAL))
+                bool(st.f_flags & MNT_LOCAL),
+                st.f_mntfromname.decode("utf-8", "replace"))
     except Exception:  # noqa: BLE001 — a description must never break a copy
         return None
 
@@ -144,26 +146,107 @@ def share_label(volume):
     """'FOLIAGE (SMB)' for a network volume from describe_volume()."""
     import os
 
-    mount, fstype, _local = volume
+    mount, fstype = volume[0], volume[1]
     return f"{os.path.basename(mount) or mount} ({_SHARE_KINDS.get(fstype, fstype)})"
 
 
-def flush_failure_text(err, volume):
+def share_endpoint(volume):
+    """(host, port) a network volume is mounted from; host None if unparseable.
+    //user@host[:port]/share (SMB, AFP), host:/path (NFS), http(s)://host/."""
+    from urllib.parse import unquote, urlsplit
+
+    src = volume[3] if len(volume) > 3 else ""
+    port = None
+    if src.startswith("//"):
+        host = src[2:].split("/", 1)[0].rsplit("@", 1)[-1]
+        if host.startswith("["):
+            # [IPv6]:port. Anything else after the bracket is malformed.
+            inner, sep, rest = host[1:].partition("]")
+            if not sep or (rest and not (rest.startswith(":") and rest[1:].isdigit())):
+                return None, None
+            host, port = inner, (int(rest[1:]) if rest else None)
+        elif host.count(":") == 1:
+            host, _, p = host.partition(":")
+            if not p.isdigit():
+                return None, None
+            port = int(p)
+        elif ":" in host:
+            return None, None  # bare IPv6 without brackets: ambiguous
+    elif src.startswith(("http://", "https://")):
+        parts = urlsplit(src)
+        host = parts.hostname or ""
+        try:
+            port = parts.port or (443 if parts.scheme == "https" else 80)
+        except ValueError:
+            return None, None
+    elif ":/" in src:
+        host = src.split(":/", 1)[0]
+    else:
+        return None, None
+    host = unquote(host).strip().strip("[]").lower().rstrip(".")
+    return (host or None), port
+
+
+def _ip_is_this_mac(addr):
+    """True unless binding to addr fails with EADDRNOTAVAIL, the one answer
+    that proves it belongs to another machine. Any other error fails closed."""
+    import errno
+    import ipaddress
+    import socket
+
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return True
+    if ip.is_loopback or ip.is_unspecified:
+        return True
+    family = socket.AF_INET6 if ip.version == 6 else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            sock.bind((addr, 0))
+        return True
+    except OSError as e:
+        return e.errno != errno.EADDRNOTAVAIL
+
+
+def share_on_this_mac(volume):
+    """True unless the share is mounted by an IP address that provably isn't
+    this Mac's. A name (DNS alias, Bonjour) is never proof: it can point back
+    to this Mac, and whether it does can change mid-job as this Mac's own file
+    server stops and starts (Sol rounds 2-5). An address answers for itself."""
+    import ipaddress
+
+    host, _port = share_endpoint(volume)
+    if not host:
+        return True
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return _ip_is_this_mac(host)
+
+
+def flush_failure_text(err, volume, fsync_err=None):
     """Operator-facing reason a destination could not flush to media."""
     import errno as _errno
 
     code = _errno.errorcode.get(err, str(err))
+    if fsync_err is not None:
+        sync_code = _errno.errorcode.get(fsync_err, str(fsync_err))
+        where = share_label(volume) if volume is not None else "the destination"
+        return (f"F_FULLFSYNC failed ({code}) and plain fsync also failed "
+                f"({sync_code}) on {where}")
     if volume is None:
         return f"F_FULLFSYNC failed ({code}); plain fsync was used"
-    mount, fstype, local = volume
+    mount, fstype, local = volume[0], volume[1], volume[2]
     if not local and err in (_errno.ENOTTY, _errno.ENOTSUP):
         # A DIT reads this, not a kernel engineer: network shares never
         # confirm a flush, and that is normal, not a fault.
         # Durability only: verification results live elsewhere (a Fast run
         # never reads back, so this must not claim it did).
-        return (f"{share_label(volume)} is a network share: macOS can't confirm "
-                "the server has written the copy to its disks. Copies on network "
-                "shares don't count toward SAFE TO WIPE")
+        return (f"{share_label(volume)} is a network share: the server accepted "
+                "the sync, but macOS can't confirm from this Mac that the copy "
+                "is on the server's disks")
     where = "network" if not local else "local"
     return f"{mount} ({fstype}, {where}) rejected F_FULLFSYNC ({code}); plain fsync was used"
 

@@ -292,6 +292,9 @@ final class Job: ObservableObject, Identifiable {
     @Published var fullyVerified = false
     @Published var safeToWipe = false
     @Published var physicalDevices = 0
+    /// The engine's full_flush_before_close; false when a network share
+    /// synced through its server instead (nil: not reported).
+    @Published var mediaFlushConfirmed: Bool?
     @Published var wipeBlockers: [String] = []
     private(set) var messages: [JobMessage] = []
     private(set) var errorCount = 0
