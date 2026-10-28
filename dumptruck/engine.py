@@ -180,7 +180,8 @@ class OffloadResult:
     # during the pinned lifetime.
     network_roots: dict = field(default_factory=dict)
     # Network roots that count as a drive: diskutil could not resolve their
-    # disks and they are mounted by an IP address this Mac doesn't have. All
+    # disks and their server provably isn't this Mac (macio.share_on_this_mac:
+    # the SMB connection's own server address, else an IP literal). All
     # of them TOGETHER count as one device (attestation), so one NAS mounted
     # twice is never two copies.
     counted_shares: set = field(default_factory=set)
@@ -327,10 +328,10 @@ class OffloadResult:
             elif uncounted:
                 blockers.append(
                     f"SAFE TO WIPE needs verified copies on 2 separate drives; this run "
-                    f"has {len(devices)}. {', '.join(uncounted)} doesn't count: a network "
-                    "share counts as a drive only when it's connected by IP address "
-                    "(Go > Connect to Server, smb://192.168.x.x), so Dumptruck can "
-                    "confirm it's a different machine from this Mac")
+                    f"has {len(devices)}. {', '.join(uncounted)} doesn't count: it is on "
+                    "this Mac, or Dumptruck couldn't confirm it's a different machine. "
+                    "If it's a NAS, connecting by IP address (Go > Connect to Server, "
+                    "smb://192.168.x.x) lets Dumptruck check it")
             elif len(counted) > 1:
                 blockers.append(
                     f"copies span only {len(devices)} known physical device(s); 2+ "
