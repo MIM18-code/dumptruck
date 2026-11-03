@@ -170,7 +170,8 @@ private struct ArcadeJobStatus: View {
                 .lineLimit(1).truncationMode(.middle)
             Spacer()
             VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
-                         authorityWithdrawn: job.destinationAuthorityWithdrawn != nil)
+                         authorityWithdrawn: job.destinationAuthorityWithdrawn != nil,
+                             needsAttention: job.verifiedNeedsAttention)
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))

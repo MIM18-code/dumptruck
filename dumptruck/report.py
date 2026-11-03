@@ -251,19 +251,31 @@ td,th{overflow-wrap:anywhere;word-break:break-word}
 """
 
 
-def verdict_display_line(*, ok, fully_verified, safe_to_wipe):
+def _is_routine_blocker(blocker):
+    """Mirrors Job.isRoutineWipeBlocker in the Swift app. A routine reason
+    only describes how the run went. Anything else, including a reason added
+    later, keeps the amber KEEP CARD headline."""
+    return (blocker.startswith(("picked files:", "copies span only ",
+                                "SAFE TO WIPE needs verified copies on 2 separate drives"))
+            or blocker == "no consistent second source read this run"
+            or blocker.endswith("(--reverify-existing re-reads them)"))
+
+
+def verdict_display_line(*, ok, fully_verified, safe_to_wipe, blockers=()):
     """The report's single terminal verdict vocabulary.
 
-    This mirrors Job.Verdict.displayLine in the Swift app. Verification and
+    This mirrors Job.verdictLine in the Swift app. Verification and
     attestation facts remain separately disclosed below the headline; they may
     not form a second, competing verdict badge.
     """
     if not ok:
-        return "FAILED — DO NOT WIPE", "bad"
+        return "FAILED · KEEP CARD", "bad"
     if not fully_verified:
-        return "UNVERIFIED — KEEP CARD", "bad"
+        return "COPIED · NOT VERIFIED", "warn"
     if safe_to_wipe:
-        return "SAFE TO WIPE", "ok"
+        return "VERIFIED · SAFE TO CLEAR", "ok"
+    if all(_is_routine_blocker(b) for b in blockers):
+        return "VERIFIED", "ok"
     return "VERIFIED · KEEP CARD", "warn"
 
 
@@ -297,7 +309,8 @@ def build_report(result, att, card_info, media_info, dataset=None):
     verdict, vclass = verdict_display_line(
         ok=result.ok,
         fully_verified=result.fully_verified,
-        safe_to_wipe=att["safe_to_wipe_source"])
+        safe_to_wipe=att["safe_to_wipe_source"],
+        blockers=att.get("safe_to_wipe_blockers", ()))
 
     rows = []
     for f in sorted(files, key=lambda f: f.rel_path):
@@ -423,7 +436,7 @@ def build_report(result, att, card_info, media_info, dataset=None):
  else '<span class="warn">DEGRADED — F_NOCACHE failed on at least one descriptor; some verify reads may have been cache-served</span>'}</td></tr>
 <tr><td>Durability</td><td>{_durability_html(result, att)}</td></tr>
 <tr><td>Verified copies / physical devices</td><td>{_copies_devices_text(att)}{_share_note(result)}</td></tr>
-{'' if att['safe_to_wipe_source'] else '<tr><td>Why keep the card</td><td>' + '<br>'.join(_esc(b) for b in att.get('safe_to_wipe_blockers', [])) + '</td></tr>'}
+{'' if att['safe_to_wipe_source'] else '<tr><td>Why not safe to clear</td><td>' + '<br>'.join(_esc(b) for b in att.get('safe_to_wipe_blockers', [])) + '</td></tr>'}
 <tr><td>Codec/media validation</td><td class="warn">NOT PERFORMED — copy integrity only</td></tr>
 </table>
 

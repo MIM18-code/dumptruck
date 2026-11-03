@@ -283,7 +283,12 @@ enum HistoryExport {
     static func fields(for record: JobJournalRecord) -> [String] {
         let errorCount = record.messages.filter { $0.severity == "error" }.count
         let warningCount = record.messages.filter { $0.severity == "warning" }.count
-        let verdict = verdict(for: record).displayLine
+        let baseVerdict = verdict(for: record)
+        // Same rule as Job.verifiedNeedsAttention, for a record on disk.
+        let attention = baseVerdict == .verifiedKeepCard
+            && (!(record.custodyFailures ?? [:]).isEmpty
+                || record.wipeBlockers.contains { !Job.isRoutineWipeBlocker($0) })
+        let verdict = attention ? VerdictBadge.attentionLine : baseVerdict.displayLine
 
         return [
             record.id.uuidString,
@@ -324,7 +329,7 @@ enum HistoryExport {
             formatISO8601(job.recoveredAt),
             boundField(job.label, maxLength: maxLabelLength),
             job.phase.rawValue,
-            job.verdict.displayLine,
+            job.verdictLine,
             job.safeToWipe ? "true" : "false",
             job.fullyVerified ? "true" : "false",
             "\(job.physicalDevices)",

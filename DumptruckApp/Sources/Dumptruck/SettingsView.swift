@@ -24,6 +24,11 @@ enum Pref {
     static let projectName = "projectName"
     static let projectRecents = "projectRecents"         // pipe-separated
     static let textScale = "textScale"                   // "standard" | "large" | "extraLarge"
+    /// Display only: hides speed graphs, sealing steps, warning-only
+    /// message lists and other detail a quick offload doesn't need. Never
+    /// changes what is copied, verified or allowed (tester request,
+    /// 2026-11-03). Views read it directly, so it stays out of `all`.
+    static let simpleView = "simpleView"                 // Bool, default true
 
     /// Every preference the model or its gates read. AppModel republishes
     /// only when one of these actually changes value (see
@@ -244,21 +249,18 @@ private struct TransferSettings: View {
 
                 Picker("Verification", selection: $verifyMode) {
                     Text("Full — every destination byte re-read and compared").tag("full")
-                    Text("Fast — size check only (NOT verified, nothing sealed)").tag("fast")
+                    Text("Fast — size check only, not verified").tag("fast")
                 }
                 .pickerStyle(.radioGroup)
                 if verifyMode == "fast" {
-                    Label("Fast copies are never sealed into MHL manifests and never earn "
-                          + Job.Verdict.safeToWipe.displayLine
-                          + ". A later full offload verifies and seals them.",
-                          systemImage: "exclamationmark.triangle.fill")
-                        .font(Typo.safety)
-                        .foregroundStyle(Semantics.warningText)
+                    Text("Fast copies aren't verified or sealed into MHL manifests. A later full offload verifies them.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
             Section {
-                settingRow(caption: "Skipping this forfeits \(Job.Verdict.safeToWipe.displayLine) for the run.") {
+                settingRow(caption: "Needed before a card can be called safe to clear.") {
                     Toggle("Re-read the source after copying (catches failing cards and readers)",
                            isOn: $sourceReread)
                 }
@@ -282,9 +284,9 @@ private struct TransferSettings: View {
             }
 
             Section {
-                settingRow(caption: "Ejects only after full verification on 2+ physical devices. Never ejects on any lesser outcome.") {
-                    Toggle("Auto-eject the source once it is "
-                           + Job.Verdict.safeToWipe.displayLine, isOn: $autoEjectWhenSafe)
+                settingRow(caption: "Never after a lesser result.") {
+                    Toggle("Eject the card automatically when it's safe to clear",
+                           isOn: $autoEjectWhenSafe)
                 }
             }
         }
@@ -310,16 +312,12 @@ private struct TransferSettings: View {
     private var levelCaption: String {
         switch verificationLevel.wrappedValue {
         case .standard:
-            return "The working DIT bar: full byte verification plus a second "
-                + "source read. Makes fresh cards eligible for "
-                + "\(Job.Verdict.safeToWipe.displayLine) — the verdict still "
-                + "requires 2+ separate drives and every runtime check."
+            return "Every byte read back and compared, and the card read a "
+                + "second time. The right setting for nearly every offload."
         case .maximum:
-            return "Everything on: prior offloads are re-read instead of trusted, "
-                + "and MD5, SHA-1, SHA-256 and C4 ride along with xxHash64 "
-                + "(persisted in the receipt while reports are on). Required "
-                + "before a continuation card can earn "
-                + Job.Verdict.safeToWipe.displayLine + "."
+            return "Also re-reads files offloaded earlier and adds MD5, SHA-1, "
+                + "SHA-256 and C4 to the receipt. Lets a topped-up card be "
+                + "called safe to clear."
         case .custom:
             return "Your own mix — set the individual controls below."
         }
@@ -414,9 +412,10 @@ private struct OrganizeSettings: View {
                             .foregroundStyle(previewError == nil ? Color.secondary : Semantics.warningText)
                             .fixedSize(horizontal: false, vertical: true)
                         if let note = previewNote {
-                            Label(note, systemImage: "exclamationmark.triangle.fill")
-                                .font(Typo.safety)
-                                .foregroundStyle(Semantics.warningText)
+                            // A note, not a fault: no project name is fine.
+                            Text(note)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -591,9 +590,15 @@ private struct CardSettings: View {
 private struct DisplaySettings: View {
     @AppStorage(Pref.textScale) private var textScaleRaw = TextScale.standard.rawValue
     @AppStorage(Pref.menuBarHUD) private var menuBarHUD = true
+    @AppStorage(Pref.simpleView) private var simpleView = true
 
     var body: some View {
         Form {
+            Section {
+                settingRow(caption: "Shows progress and the result, and hides speed graphs, per-step detail and minor notes. Copying and verification work the same either way. Also in the View menu.") {
+                    Toggle("Simple view", isOn: $simpleView)
+                }
+            }
             Section {
                 settingRow(caption: "Enlarges every label in the workbench, including verdicts, lane captions and rail echoes. Column widths are unchanged — long names truncate rather than reflow.") {
                     Picker("Text size", selection: $textScaleRaw) {

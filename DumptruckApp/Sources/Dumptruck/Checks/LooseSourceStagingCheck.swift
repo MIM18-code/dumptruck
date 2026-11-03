@@ -55,6 +55,12 @@ enum LooseSourceStagingCheck {
                 "set holds exactly the dropped names, flat")
         // Originals untouched.
         require(fm.fileExists(atPath: clipA) && fm.fileExists(atPath: clipB), "originals stay put")
+        // Named like any source: after the folder the files came from, not
+        // "Loose <timestamp>" (tester feedback, 2026-11-03).
+        require(LooseSourceStaging.suggestedLabel(for: set) == "Downloads",
+                "a dropped set is named after its folder, got \(String(describing: LooseSourceStaging.suggestedLabel(for: set)))")
+        require(LooseSourceStaging.suggestedLabel(for: downloads) == nil,
+                "a folder that is not a staged set gets no picked-files name")
 
         // 2. Refusals create nothing.
         let before = listing(stagingRoot.path).count
@@ -190,6 +196,8 @@ enum LooseSourceStagingCheck {
                 "manifest lists the picked files under their shared folder: \(String(describing: manifest))")
         require(fm.contentsEqual(atPath: pickA, andPath: pickA) && fm.fileExists(atPath: pickB),
                 "originals stay put")
+        require(LooseSourceStaging.suggestedLabel(for: picked) == "DCIM",
+                "picked clips are named after their shared drive folder")
         // The set's own creation reaches FSEvents after a watcher arms; the
         // staged-source watcher must not call that a card change.
         final class Fired: @unchecked Sendable { var value = false }
@@ -207,6 +215,8 @@ enum LooseSourceStagingCheck {
         require((try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: single
             + "/.selection/manifest.json")))) .flatMap { $0 as? [String: Any] }?["root"] as? String
                 == drive + "/DCIM/A001", "one picked file is listed under its own folder")
+        require(LooseSourceStaging.suggestedLabel(for: single) == "A001",
+                "one picked clip is named after its own folder")
         _ = LooseSourceStaging.remove(single)
         let beforeMixed = listing(stagingRoot.path).count
         do {

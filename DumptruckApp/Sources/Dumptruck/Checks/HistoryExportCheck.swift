@@ -293,7 +293,7 @@ static func requireThrows(_ body: () throws -> Void, _ message: String) {
         require(searchLabel.count == 1 && searchLabel[0].label == "A001_CARD", "Search by label failed")
 
         // 2. Search by verdict
-        let searchVerdict = JobHistoryFilterEngine.filterAndSort(jobs: jobs, query: "SAFE TO WIPE")
+        let searchVerdict = JobHistoryFilterEngine.filterAndSort(jobs: jobs, query: "SAFE TO CLEAR")
         require(searchVerdict.count == 1 && searchVerdict[0].label == "A001_CARD", "Search by verdict failed")
 
         // 3. Search by destination count

@@ -23,7 +23,7 @@ extension AppModel {
     /// the job's label keeps the warning honest (round-24 finding).
     var hudPresenceLine: String? {
         if let bad = settledBadVerdictJob {
-            return "\(bad.verdict.displayLine) · \(bad.label)"
+            return "\(bad.verdictLine) · \(bad.label)"
         }
         if let safe = latestCurrentSafeVerdict { return safe.displayLine }
         return nil

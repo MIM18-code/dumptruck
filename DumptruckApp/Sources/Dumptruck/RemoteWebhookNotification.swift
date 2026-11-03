@@ -364,7 +364,7 @@ struct WebhookPayload: Codable, Equatable, Sendable {
         return WebhookPayload(
             jobID: job.id.uuidString,
             label: label,
-            verdict: job.verdict.displayLine,
+            verdict: job.verdictLine,
             phase: job.phase.rawValue,
             fullyVerified: job.fullyVerified,
             safeToWipe: job.safeToWipe,

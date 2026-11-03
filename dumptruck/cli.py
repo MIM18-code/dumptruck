@@ -338,7 +338,7 @@ def cmd_offload(args):
         if loose:
             # A GUI-staged folder of clones. It is not a card: no format
             # signature, no dataset identity, no label memory, no continuation.
-            card = cards.CardInfo("loose", "Loose files")
+            card = cards.CardInfo("loose", "Picked files")
             known, vol, ambiguous = None, None, False
         else:
             card = cards.detect(args.source)
@@ -720,7 +720,7 @@ def cmd_inspect(args):
         if getattr(args, "selection", False):
             # Picked files are not a card: no detection, no identity.
             root, picked = engine.load_selection(args.source)
-            card = cards.CardInfo("loose", "Loose files")
+            card = cards.CardInfo("loose", "Picked files")
             known, ambiguous = None, False
             entries, _dirs, warnings = engine.scan_selected(root, picked)
         else:

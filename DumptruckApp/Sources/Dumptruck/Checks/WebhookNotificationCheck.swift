@@ -210,7 +210,7 @@ final class MockTransport: WebhookHTTPTransport, @unchecked Sendable {
         let payload = WebhookPayload.from(job: job)
         require(payload.jobID == job.id.uuidString, "Job ID mismatch")
         require(payload.label == "CARD_042", "Label mismatch")
-        require(payload.verdict == "SAFE TO WIPE", "Verdict display line mismatch")
+        require(payload.verdict == "VERIFIED · SAFE TO CLEAR", "Verdict display line mismatch")
         require(payload.phase == "Done", "Phase mismatch")
         require(payload.fullyVerified == true, "fullyVerified mismatch")
         require(payload.safeToWipe == true, "safeToWipe mismatch")
@@ -288,7 +288,7 @@ final class MockTransport: WebhookHTTPTransport, @unchecked Sendable {
         j1.safeToWipe = true
         let p1 = WebhookPayload.from(job: j1)
         require(p1.verdict == Job.Verdict.safeToWipe.displayLine, "Safe to wipe verdict mismatch")
-        require(p1.verdict == "SAFE TO WIPE", "Exact string mismatch")
+        require(p1.verdict == "VERIFIED · SAFE TO CLEAR", "Exact string mismatch")
 
         // Verified keep card
         let j2 = Job(label: "J2", sourcePath: "/s", destinations: ["/d"])
@@ -297,7 +297,7 @@ final class MockTransport: WebhookHTTPTransport, @unchecked Sendable {
         j2.safeToWipe = false
         let p2 = WebhookPayload.from(job: j2)
         require(p2.verdict == Job.Verdict.verifiedKeepCard.displayLine, "Verified keep card verdict mismatch")
-        require(p2.verdict == "VERIFIED · KEEP CARD", "Exact string mismatch")
+        require(p2.verdict == "VERIFIED", "Exact string mismatch")
 
         // Unverified
         let j3 = Job(label: "J3", sourcePath: "/s", destinations: ["/d"])
@@ -305,21 +305,21 @@ final class MockTransport: WebhookHTTPTransport, @unchecked Sendable {
         j3.fullyVerified = false
         let p3 = WebhookPayload.from(job: j3)
         require(p3.verdict == Job.Verdict.unverified.displayLine, "Unverified verdict mismatch")
-        require(p3.verdict == "UNVERIFIED — KEEP CARD", "Exact string mismatch")
+        require(p3.verdict == "COPIED · NOT VERIFIED", "Exact string mismatch")
 
         // Failed
         let j4 = Job(label: "J4", sourcePath: "/s", destinations: ["/d"])
         j4.phase = .failed
         let p4 = WebhookPayload.from(job: j4)
         require(p4.verdict == Job.Verdict.failed.displayLine, "Failed verdict mismatch")
-        require(p4.verdict == "FAILED — DO NOT WIPE", "Exact string mismatch")
+        require(p4.verdict == "FAILED · KEEP CARD", "Exact string mismatch")
 
         // Refused
         let j5 = Job(label: "J5", sourcePath: "/s", destinations: ["/d"])
         j5.phase = .refused
         let p5 = WebhookPayload.from(job: j5)
         require(p5.verdict == Job.Verdict.failed.displayLine, "Refused verdict mismatch")
-        require(p5.verdict == "FAILED — DO NOT WIPE", "Exact string mismatch")
+        require(p5.verdict == "FAILED · KEEP CARD", "Exact string mismatch")
     }
 
     // MARK: - 5. Request Builder Tests

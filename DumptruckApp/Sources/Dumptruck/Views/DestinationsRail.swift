@@ -76,12 +76,14 @@ struct DestinationsRail: View {
                             .monospacedDigit()
                     } icon: {
                         Image(systemName: twoSeparate
-                              ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                              ? "checkmark.circle.fill" : "externaldrive")
                     }
                     .font(Typo.safety)
+                    // One drive is a normal offload, not a fault: grey,
+                    // not amber. Green still means two separate drives.
                     .foregroundStyle(twoSeparate
                                      ? AnyShapeStyle(Semantics.successText)
-                                     : AnyShapeStyle(Semantics.warningText))
+                                     : AnyShapeStyle(.secondary))
                     .help("Two destinations on separate physical devices are required before a card can be called safe to wipe. The engine resolves physical devices at Start; its attestation is what decides \(Job.Verdict.safeToWipe.displayLine).")
                 }
                 Text(model.destinationPaths.count == 1 ? "Destination" : "Destinations")
@@ -105,8 +107,8 @@ struct DestinationsRail: View {
         if model.destinationPaths.isEmpty {
             // Empty means invitation — and the safety sentence stays: it is
             // the one line a first-time operator must read.
-            RailDropSlot(title: "Add two drives",
-                         subtitle: "A card needs two separate drives before it can be called safe to wipe.",
+            RailDropSlot(title: "Drop drives here",
+                         subtitle: "Two separate drives let Dumptruck tell you a card is safe to clear.",
                          tint: Semantics.destination)
         } else {
             let sameDrive = sameDriveGroups
@@ -117,7 +119,7 @@ struct DestinationsRail: View {
                     .transition(.scale.combined(with: .opacity))
             }
             if !sameDrive.isEmpty {
-                Label("Endpoints on the same volume are ONE copy — the engine's attestation decides.",
+                Label("Two of these are on the same drive, so they count as one copy.",
                       systemImage: "exclamationmark.triangle.fill")
                     .font(Typo.safety)
                     .foregroundStyle(Semantics.warningText)
@@ -295,19 +297,11 @@ struct DestinationCard: View {
                 .help(report.summaryDescription)
                 .accessibilityLabel("Destination template tokens unavailable: \(report.accessibilitySummary)")
             } else if report.hasOmitted {
-                // An unset project name is a note on the card, not a reason
-                // to refuse it: the rendered path below shows where the
-                // footage lands (Joshua, 2026-10-05).
-                Label {
-                    Text(report.summaryDescription)
-                        .font(Typo.safety)
-                        .fixedSize(horizontal: false, vertical: true)
-                } icon: {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                }
-                .foregroundStyle(Semantics.warningText)
-                .help(report.summaryDescription)
-                .accessibilityLabel("Destination template note: \(report.accessibilitySummary)")
+                // No project name is a normal day: the path above already
+                // shows where the footage lands, so the card says nothing.
+                // The yellow note on every destination read as a standing
+                // error (tester feedback, 2026-11-03).
+                EmptyView()
             } else if report.hasFallback {
                 Label {
                     Text(report.summaryDescription)

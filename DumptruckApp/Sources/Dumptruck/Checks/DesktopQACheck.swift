@@ -607,6 +607,8 @@ enum DesktopQACheck {
         // with Force Eject as the only way out (Joshua, 2026-09-28).
         if case .transferRunning(let job, false) = shelfModel.ejectHold(shelfVolume) {
             require(job === runningDestination, "the mid-job hold names the running destination job")
+            require(!shelfModel.ejectIsHarmless(shelfVolume),
+                    "ejecting a drive mid-job must still ask first")
         } else {
             require(false, "a destination receiving a job was not named as mid-transfer")
         }
@@ -615,9 +617,124 @@ enum DesktopQACheck {
         oneDrive.fullyVerified = true
         oneDrive.wipeBlockers = ["copies span only 1 known physical device(s); 2+ required"]
         shelfModel.jobs = [oneDrive]
-        require(oneDrive.verdict == .verifiedKeepCard, "one-drive fixture is VERIFIED · KEEP CARD")
+        require(oneDrive.verdict == .verifiedKeepCard, "one-drive fixture is VERIFIED (keep card)")
         require(!shelfModel.canEject(shelfVolume),
                 "a keep-card verdict still withholds one-click source eject")
+        // A routine reason stays plain good news; anything else, including
+        // a reason this build has never heard of, keeps KEEP CARD in amber.
+        // Custody damage demotes SAFE to this same verdict, so this is what
+        // stands between a damaged copy and a green badge.
+        require(!oneDrive.verifiedNeedsAttention && oneDrive.verdictLine == "VERIFIED",
+                "one drive is a clean VERIFIED")
+        for routine in ["picked files: this run copied chosen files, not a whole card",
+                        "no consistent second source read this run",
+                        "3 file(s) accepted on prior-generation trust on at least one destination without re-verification this run (--reverify-existing re-reads them)",
+                        "SAFE TO WIPE needs verified copies on 2 separate drives; this run has 1. NAS doesn't count"] {
+            oneDrive.wipeBlockers = [routine]
+            require(!oneDrive.verifiedNeedsAttention, "routine reason read as a problem: \(routine)")
+        }
+        for serious in ["a later verification found damage in CARD: 1 failed",
+                        "a previous custody check found damage; run Verify Existing Custody before wiping",
+                        "source tree changed after the initial scan",
+                        "2 source object(s) were not copied",
+                        "full flush-to-media failed on at least one destination file",
+                        "cache bypass failed on at least one destination write",
+                        "no destination copy was fully read this run",
+                        "a reason added by some later version"] {
+            oneDrive.wipeBlockers = ["copies span only 1 known physical device(s); 2+ required", serious]
+            require(oneDrive.verifiedNeedsAttention && oneDrive.verdictLine == "VERIFIED · KEEP CARD",
+                    "a serious reason read as a clean VERIFIED: \(serious)")
+            require(oneDrive.attentionBlockers == [serious], "the amber card must name \(serious)")
+        }
+        oneDrive.wipeBlockers = ["copies span only 1 known physical device(s); 2+ required"]
+        require(Job.plainWipeBlocker(oneDrive.wipeBlockers[0]).hasPrefix("Only one separate drive"),
+                "the one-drive reason reads in plain words")
+        require(Job.plainWipeBlocker("2 source object(s) were not copied").hasPrefix("2 items"),
+                "a count survives into the plain wording")
+        require(Job.plainWipeBlocker("1 source object(s) were not copied").hasPrefix("1 item on"),
+                "one item reads as one item")
+        require(Job.plainWipeBlocker("a reason added by some later version") == "a reason added by some later version",
+                "an unknown reason shows as written, never swallowed")
+        require(oneDrive.spokenResult == "ONE_DRIVE: verified",
+                "VoiceOver reads the result in words, got \(oneDrive.spokenResult)")
+        // The batch summary: one line once nothing is left running, and it
+        // never reads as all-clear when a card didn't make it.
+        func settled(_ label: String, verified: Bool, phase: JobPhase = .done,
+                     blockers: [String] = []) -> Job {
+            let job = Job(label: label, sourcePath: "/tmp/\(label)", destinations: [dest])
+            job.phase = phase
+            job.fullyVerified = verified
+            job.wipeBlockers = blockers
+            return job
+        }
+        let doneA = settled("DONE_A", verified: true)
+        let doneB = settled("DONE_B", verified: true)
+        doneB.phase = .copying
+        shelfModel.jobs = [doneA, doneB]
+        shelfModel.noteFinishedForAllDone(doneA)
+        require(shelfModel.allDoneSummary == nil, "no summary while a card is still running")
+        doneB.phase = .done
+        shelfModel.noteFinishedForAllDone(doneB)
+        require(shelfModel.allDoneSummary == AllDoneSummary(line: "All 2 cards verified.", tone: .good),
+                "two clean cards summarize as verified, got \(String(describing: shelfModel.allDoneSummary))")
+        // Damage found later turns the same strip amber instead of leaving
+        // an all-clear standing.
+        doneA.custodyFailures["/Volumes/DEST"] = LaterVerification(
+            date: Date(), folder: "/Volumes/DEST", passed: 0, failed: 1, missing: 0,
+            new: 0, unverifiable: 0, chainProblems: 0)
+        require(shelfModel.allDoneSummary?.tone == .attention,
+                "later damage must change the batch line, got \(String(describing: shelfModel.allDoneSummary))")
+        // One at a time: a queued card keeps the batch open, so the last
+        // card's finish still reports the whole run.
+        let serialA = settled("SERIAL_A", verified: true)
+        let serialB = settled("SERIAL_B", verified: true, phase: .queued)
+        shelfModel.jobs = [serialA, serialB]
+        shelfModel.noteFinishedForAllDone(serialA)
+        require(shelfModel.allDoneSummary == nil, "a queued card keeps the batch open")
+        serialB.phase = .done
+        shelfModel.noteFinishedForAllDone(serialB)
+        require(shelfModel.allDoneSummary == AllDoneSummary(line: "All 2 cards verified.", tone: .good),
+                "a one-at-a-time batch still gets its summary")
+        // Amber results reach the Dock and menu bar, and a clean retry of
+        // the same card clears them.
+        let amberRun = settled("AMBER_RUN", verified: true, blockers: ["source tree changed after the initial scan"])
+        shelfModel.jobs = [amberRun]
+        require(shelfModel.dockBadge(activeJobCount: 0) == "!"
+                    && shelfModel.hudPresenceLine == "VERIFIED · KEEP CARD · AMBER_RUN",
+                "an amber result must warn on the Dock and menu bar, got \(String(describing: shelfModel.hudPresenceLine))")
+        let lone = settled("LONE", verified: true)
+        shelfModel.jobs = [lone]
+        shelfModel.noteFinishedForAllDone(lone)
+        require(shelfModel.allDoneSummary == nil, "a single job gets no batch summary")
+        let mixed = [settled("OK", verified: true),
+                     settled("AMBER", verified: true, blockers: ["source tree changed after the initial scan"]),
+                     settled("FAST", verified: false),
+                     settled("BAD", verified: false, phase: .failed)]
+        require(AllDoneSummary.from(mixed)
+                    == AllDoneSummary(line: "All 4 cards done: 1 verified, 2 need a look, 1 failed.", tone: .failed),
+                "got \(String(describing: AllDoneSummary.from(mixed)))")
+        require(AllDoneSummary.from(Array(mixed.prefix(2)))?.tone == .attention,
+                "an amber card keeps the summary amber")
+        require(AppModel.showsNotificationsOffHint(off: true, notifyOnCompletion: true,
+                                                   dismissed: false, hasLiveJobs: true),
+                "denied notifications get the hint")
+        for (on, dismissed, live) in [(false, false, true), (true, true, true), (true, false, false)] {
+            require(!AppModel.showsNotificationsOffHint(off: true, notifyOnCompletion: on,
+                                                        dismissed: dismissed, hasLiveJobs: live),
+                    "the hint must stay quiet: \(on) \(dismissed) \(live)")
+        }
+        require(!AppModel.showsNotificationsOffHint(off: false, notifyOnCompletion: true,
+                                                    dismissed: false, hasLiveJobs: true),
+                "allowed notifications get no hint")
+        shelfModel.jobs = [oneDrive]
+        // Ejecting after a verified copy only ends a read: one click, no
+        // sheet (tester feedback, 2026-11-03).
+        // This fixture has no live source session, so its verdict is stale:
+        // the "keep the card" sheet stays. The current-verdict case is the
+        // live one-click path.
+        require(!shelfModel.isCurrentSourceVerdict(oneDrive)
+                    && !shelfModel.ejectIsHarmless(shelfVolume),
+                "a verified verdict that no longer covers the card keeps its eject sheet")
         if case .verifiedNotSafe(let job, true) = shelfModel.ejectHold(shelfVolume) {
             require(job === oneDrive, "the single-drive hold names the verified job")
         } else {
@@ -651,6 +768,8 @@ enum DesktopQACheck {
         if case .copiesUnverified(_, true) = shelfModel.ejectHold(shelfVolume) {} else {
             require(false, "an UNVERIFIED source run lost its unverified warning")
         }
+        require(!shelfModel.ejectIsHarmless(shelfVolume),
+                "an unverified card must still ask before ejecting")
         oneDrive.fullyVerified = true
         oneDrive.safeToWipe = true
         oneDrive.wipeBlockers = []
@@ -658,6 +777,8 @@ enum DesktopQACheck {
         if case .verdictNotCurrent = shelfModel.ejectHold(shelfVolume) {} else {
             require(false, "a SAFE verdict without live proof was not named as no longer current")
         }
+        require(!shelfModel.ejectIsHarmless(shelfVolume),
+                "a stale SAFE verdict keeps its eject warning")
         // A SAFE whose post-verdict re-check of the copies is still running
         // is not "no longer covers this card" (Joshua, 2026-09-28).
         oneDrive.destinationCheckPending = true

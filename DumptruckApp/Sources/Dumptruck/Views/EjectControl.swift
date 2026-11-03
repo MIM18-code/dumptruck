@@ -9,12 +9,12 @@ struct EjectControl: View {
 
     var body: some View {
         if model.offersEject(volume) {
-            if model.canEject(volume) {
+            if model.canEject(volume) || model.ejectIsHarmless(volume) {
                 Button {
                     // Re-check on the click: a source-tree event can retire a
                     // verdict between SwiftUI rendering this branch and the
                     // operator pressing the control.
-                    if model.canEject(volume) {
+                    if model.canEject(volume) || model.ejectIsHarmless(volume) {
                         model.eject(volume)
                     } else {
                         forceEjectTarget = volume
@@ -149,7 +149,7 @@ struct ForceEjectSheet: View {
         case .custodyDamaged:
             return "A copy of this card was found damaged"
         case .verifiedNotSafe(_, let singleDrive):
-            return singleDrive ? "Backed up to one drive only" : "Verified, but not safe to wipe"
+            return singleDrive ? "Backed up to one drive only" : "Verified, but not yet safe to clear"
         case .verdictNotCurrent:
             return "Verdict no longer covers this card"
         case .destinationCheckPending:
@@ -180,7 +180,7 @@ struct ForceEjectSheet: View {
         case .verifiedNotSafe(_, true):
             text = "\(name) is verified, but its footage is on only one drive. That copy is good; one copy is not a backup. Eject if you like, but **keep this card and don't format it** until a second drive holds a verified copy."
         case .verifiedNotSafe(_, false):
-            text = "\(name) is verified, but the engine withheld SAFE TO WIPE for the reasons below. Eject if you like, but **keep this card and don't format it** until they are resolved."
+            text = "\(name) is verified, but not yet safe to clear, for the reasons below. Eject if you like, but **keep this card and don't format it** for now."
         case .verdictNotCurrent(let job):
             let why = job.destinationAuthorityWithdrawn.map { " (\(Self.escaped($0)))" } ?? ""
             text = "**\(Self.escaped(job.label))** was marked \(Job.Verdict.safeToWipe.displayLine), but that verdict no longer covers the card mounted now: it was re-staged, changed, or a copy moved since\(why). Treat it as unverified and keep the card."

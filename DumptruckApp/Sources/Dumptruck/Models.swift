@@ -317,7 +317,82 @@ final class Job: ObservableObject, Identifiable {
     @Published var custodyFailures: [String: LaterVerification] = [:]
     var hasCustodyFailure: Bool { !custodyFailures.isEmpty }
     var currentCustodyEcho: String? {
-        hasCustodyFailure ? "custody check failed, keep the card" : verdict.railEcho
+        if hasCustodyFailure { return "custody check failed, keep the card" }
+        return verifiedNeedsAttention ? "verified · keep the card" : verdict.railEcho
+    }
+
+    /// Reasons a verified card can't be cleared that only describe how the
+    /// run went: nothing is wrong with the copy, so the card stays green and
+    /// the reason stays one click away (tester feedback, 2026-11-03). Matched
+    /// narrowly on purpose: any other reason, including one added later,
+    /// keeps the amber KEEP CARD treatment. "no destination copy was fully
+    /// read" is not here: green must never mean nothing was read.
+    nonisolated static func isRoutineWipeBlocker(_ blocker: String) -> Bool {
+        blocker.hasPrefix("picked files:")
+            || blocker.hasPrefix("copies span only ")
+            || blocker.hasPrefix("SAFE TO WIPE needs verified copies on 2 separate drives")
+            || blocker == "no consistent second source read this run"
+            || blocker.hasSuffix("(--reverify-existing re-reads them)")
+    }
+
+    var attentionBlockers: [String] {
+        wipeBlockers.filter { !Self.isRoutineWipeBlocker($0) }
+    }
+
+    /// A verified verdict that must not read as plain good news: a later
+    /// check found damage (which demotes SAFE to this verdict), the source
+    /// changed mid-copy, a file was left behind, a flush failed.
+    var verifiedNeedsAttention: Bool {
+        verdict == .verifiedKeepCard && (hasCustodyFailure || !attentionBlockers.isEmpty)
+    }
+
+    /// The verdict words for this job on every surface that names one job.
+    var verdictLine: String {
+        verifiedNeedsAttention ? VerdictBadge.attentionLine : verdict.displayLine
+    }
+
+    /// What VoiceOver says when this job finishes.
+    var spokenResult: String {
+        "\(label): " + verdictLine.lowercased().replacingOccurrences(of: " · ", with: ", ")
+    }
+
+    /// A routine reason in plain words. The engine's wording stays in the
+    /// receipt and report; anything unrecognized shows as written.
+    nonisolated static func plainWipeBlocker(_ blocker: String) -> String {
+        if blocker.hasPrefix("copies span only 1 known physical device(s); 2+ required") {
+            return "Only one separate drive has a verified copy. Add a second drive to clear this card."
+        }
+        if blocker.hasPrefix("copies span only 0 ") {
+            return "Dumptruck couldn't confirm these drives are separate disks."
+        }
+        if blocker == "no consistent second source read this run" {
+            return "The card wasn't read a second time (Settings › Transfers)."
+        }
+        if blocker.hasSuffix("(--reverify-existing re-reads them)") {
+            return "Files from earlier offloads weren't re-read. Maximum verification (Settings › Transfers) reads them again."
+        }
+        if blocker == "source tree changed after the initial scan" {
+            return "The card changed while it was being copied. Offload it again before clearing it."
+        }
+        if blocker.hasSuffix(" source object(s) were not copied") {
+            let count = blocker.prefix { $0.isNumber }
+            return count == "1"
+                ? "1 item on the card wasn't copied. The notes below say which."
+                : "\(count) items on the card weren't copied. The notes below say which."
+        }
+        if blocker.hasPrefix("full flush-to-media failed") {
+            return "A drive didn't confirm everything reached the disk. Keep the card, or try another drive."
+        }
+        if blocker.hasPrefix("cache bypass failed") {
+            return "A drive couldn't be read back directly, so its check is weaker. Keep the card, or try another drive."
+        }
+        if blocker == "no destination copy was fully read this run" {
+            return "Nothing was read back this run. Keep the card, or use Maximum verification (Settings › Transfers)."
+        }
+        if blocker == "camera-written MHL custody was not preserved consistently" {
+            return "The camera's own checksum records didn't copy cleanly. Keep the card."
+        }
+        return blocker.replacingOccurrences(of: "SAFE TO WIPE needs", with: "Clearing a card needs")
     }
     func custodyFailure(for root: String) -> LaterVerification? {
         custodyFailures.first { pathIsAtOrInsideLexically($0.key, root: root)
@@ -861,11 +936,15 @@ final class Job: ObservableObject, Identifiable {
         /// card — one mapping, no drift (Kimi feature review F15).
         var displayLine: String {
             switch self {
+            // Plain words, one per outcome (tester feedback, 2026-11-03):
+            // a verified copy is good news and reads as good news. Whether
+            // the card may also be cleared is a bonus on top of VERIFIED,
+            // never the only green state.
             case .running: return "Running"
-            case .safeToWipe: return "SAFE TO WIPE"
-            case .verifiedKeepCard: return "VERIFIED · KEEP CARD"
-            case .unverified: return "UNVERIFIED — KEEP CARD"
-            case .failed: return "FAILED — DO NOT WIPE"
+            case .safeToWipe: return "VERIFIED · SAFE TO CLEAR"
+            case .verifiedKeepCard: return "VERIFIED"
+            case .unverified: return "COPIED · NOT VERIFIED"
+            case .failed: return "FAILED · KEEP CARD"
             }
         }
     }
@@ -941,5 +1020,35 @@ final class Job: ObservableObject, Identifiable {
         }
         guard byteETA != nil || fileETA != nil else { return nil }
         return max(byteETA ?? 0, fileETA ?? 0)
+    }
+}
+
+/// The one line for a whole batch finishing. Each card still reports for
+/// itself; this is the moment you can walk away (tester feedback,
+/// 2026-11-03). Never reads as plain good news when any card didn't.
+struct AllDoneSummary: Equatable {
+    enum Tone: Equatable { case good, attention, failed }
+    let line: String
+    let tone: Tone
+
+    /// nil for a single job: its own card and banner already said it.
+    @MainActor
+    static func from(_ jobs: [Job]) -> AllDoneSummary? {
+        guard jobs.count >= 2 else { return nil }
+        let failed = jobs.filter { $0.verdict == .failed }.count
+        let look = jobs.filter {
+            $0.verdict == .unverified || $0.verifiedNeedsAttention
+                || ($0.verdict == .safeToWipe && $0.destinationAuthorityWithdrawn != nil)
+        }.count
+        let verified = jobs.count - failed - look
+        if failed == 0, look == 0 {
+            return AllDoneSummary(line: "All \(jobs.count) cards verified.", tone: .good)
+        }
+        var parts: [String] = []
+        if verified > 0 { parts.append("\(verified) verified") }
+        if look > 0 { parts.append("\(look) \(look == 1 ? "needs" : "need") a look") }
+        if failed > 0 { parts.append("\(failed) failed") }
+        return AllDoneSummary(line: "All \(jobs.count) cards done: " + parts.joined(separator: ", ") + ".",
+                              tone: failed > 0 ? .failed : .attention)
     }
 }

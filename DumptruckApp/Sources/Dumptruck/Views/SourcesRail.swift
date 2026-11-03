@@ -184,7 +184,7 @@ private struct BatchRailSection: View {
             if model.destinationPaths.isEmpty {
                 Text("Add destination drives to check these cards.")
                     .font(Typo.evidence)
-                    .foregroundStyle(Semantics.warningText)
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Button {
@@ -419,9 +419,10 @@ struct SourceCard: View {
     private var echoColor: Color {
         if withdrawnByEjection, echoJob?.hasCustodyFailure != true { return Semantics.warningText }
         if echoJob?.hasCustodyFailure == true || withdrawnJob != nil { return Semantics.dangerText }
+        if echoJob?.verifiedNeedsAttention == true { return Semantics.warningText }
         switch echoJob?.verdict {
         case .safeToWipe: return Semantics.successText
-        case .verifiedKeepCard: return Semantics.warningText
+        case .verifiedKeepCard: return Semantics.successText
         case .unverified: return Semantics.warningText
         case .failed: return Semantics.dangerText
         default: return .secondary
@@ -430,9 +431,10 @@ struct SourceCard: View {
     private var echoSymbol: String {
         if withdrawnByEjection, echoJob?.hasCustodyFailure != true { return "eject.circle" }
         if echoJob?.hasCustodyFailure == true || withdrawnJob != nil { return "xmark.octagon.fill" }
+        if echoJob?.verifiedNeedsAttention == true { return "externaldrive.badge.exclamationmark" }
         switch echoJob?.verdict {
         case .safeToWipe: return "checkmark.seal.fill"
-        case .verifiedKeepCard: return "externaldrive.badge.exclamationmark"
+        case .verifiedKeepCard: return "checkmark.seal.fill"
         case .failed: return "xmark.octagon.fill"
         default: return "exclamationmark.triangle.fill"
         }

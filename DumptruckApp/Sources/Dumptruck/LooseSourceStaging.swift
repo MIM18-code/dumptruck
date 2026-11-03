@@ -84,6 +84,29 @@ enum LooseSourceStaging {
     /// A set's manifest never changes once written.
     nonisolated(unsafe) private static var selectionRoots: [String: String] = [:]
 
+    /// The folder the dropped files came from, by set path. Lives for the
+    /// app session: the label is settled before Start, and a relaunch
+    /// falls back to the engine's suggestion.
+    nonisolated(unsafe) private static var originFolders: [String: String] = [:]
+
+    /// A card name for a staged set: the name of the folder its files came
+    /// from ("mm1", "Day 2 Audio"), so picked files land in a folder named
+    /// like any other source instead of "Loose <timestamp>" (tester
+    /// feedback, 2026-11-03). nil when no usable name is known.
+    static func suggestedLabel(for path: String, root: URL = root) -> String? {
+        guard isStagedSet(path, root: root) else { return nil }
+        let std = URL(fileURLWithPath: path).standardizedFileURL.path
+        let folder = isSelectionSet(std, root: root)
+            ? sourceLocation(of: std, root: root)
+            : originFolders[std]
+        guard let folder else { return nil }
+        let name = (folder as NSString).lastPathComponent
+        guard !name.isEmpty, name != "/",
+              !name.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
+        else { return nil }
+        return name
+    }
+
     /// Engine arguments that mark a staged set, after the source path.
     static func engineFlags(for path: String, root: URL = root) -> [String] {
         isSelectionSet(path, root: root) ? ["--selection"] : []
@@ -170,6 +193,7 @@ enum LooseSourceStaging {
             try? FileManager.default.removeItem(at: setURL)
             throw error
         }
+        originFolders[setURL.standardizedFileURL.path] = commonFolder(of: accepted.map(\.path)).root
         return setURL.path
     }
 

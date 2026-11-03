@@ -16,6 +16,16 @@ struct FocusJobsCommand: View {
     }
 }
 
+/// ⌥⌘S: the quick-offload view (tester request, 2026-11-03).
+struct SimpleViewCommand: View {
+    @AppStorage(Pref.simpleView) private var simpleView = true
+
+    var body: some View {
+        Toggle("Simple View", isOn: $simpleView)
+            .keyboardShortcut("s", modifiers: [.option, .command])
+    }
+}
+
 /// ⇧⌘V: Commands cannot read the environment directly, so the window
 /// action lives in a small view, like HelpMenuCommand.
 struct VerifyCustodyCommand: View {
@@ -93,6 +103,7 @@ struct DumptruckCoreApplication: App {
                 .keyboardShortcut("r", modifiers: [.command])
             }
             CommandGroup(after: .sidebar) {
+                SimpleViewCommand()
                 FocusJobsCommand()
             }
             CommandGroup(replacing: .importExport) {

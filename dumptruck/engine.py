@@ -305,7 +305,7 @@ class OffloadResult:
         )
         blockers = []
         if self.loose_files:
-            blockers.append("loose files: the originals are not a card, nothing to wipe")
+            blockers.append("picked files: this run copied chosen files, not a whole card")
         if not self.fully_verified:
             blockers.append("copy is not fully verified")
         revoked = sorted({self.network_roots[cr] for cr in verified_roots

@@ -548,7 +548,8 @@ private struct HistoryJobRow: View {
                 Spacer()
 
                 VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
-                             authorityWithdrawn: job.destinationAuthorityWithdrawn != nil)
+                             authorityWithdrawn: job.destinationAuthorityWithdrawn != nil,
+                             needsAttention: job.verifiedNeedsAttention)
                     .layoutPriority(1)
             }
 

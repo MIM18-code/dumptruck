@@ -124,7 +124,7 @@ private struct LooseAwareBatchInspector: BatchSourceInspector {
         return BatchInspectionResult(
             protocolVersion: result.protocolVersion,
             metadata: CardInspectionMetadata(
-                label: result.metadata.label,
+                label: LooseSourceStaging.suggestedLabel(for: sourcePath) ?? result.metadata.label,
                 totalBytes: result.metadata.totalBytes,
                 fileCount: result.metadata.fileCount,
                 customProperties: properties,

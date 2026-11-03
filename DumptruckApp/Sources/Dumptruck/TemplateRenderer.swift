@@ -61,7 +61,7 @@ enum TemplateRenderer {
     /// What the UI says when {Project} is in the template and no project
     /// name is set. The path renders without that segment ("{Project}/Raws"
     /// lands in "Raws"); nothing is at risk, so this is a note, never a gate.
-    static let projectOmittedNote = "No project name set, so {Project} is left out of the folder path (Settings > Organize)"
+    static let projectOmittedNote = "No project name, so the path skips that folder. That's fine."
 
     /// True when `template` names {Project} and `project` is blank: the
     /// rendered path skips that segment and the UI should say so.

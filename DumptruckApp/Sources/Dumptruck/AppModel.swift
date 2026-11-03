@@ -465,6 +465,7 @@ final class AppModel: ObservableObject {
             Pref.soundEffects: true,
             Pref.haptics: true,
             Pref.menuBarHUD: true,
+            Pref.simpleView: true,
             Pref.folderTemplate: "{Project}/Raws",
             Pref.projectName: "",
         ])
@@ -573,6 +574,18 @@ final class AppModel: ObservableObject {
         objectWillChange.send()
         updateDockTile()
     }
+
+    /// Set only when macOS says banners are denied for this app.
+    @Published private(set) var notificationsOff = false
+    /// The jobs behind the "All 4 cards done" strip, until dismissed or the
+    /// next job starts. The line is read from them each time, so a later
+    /// damage finding changes it instead of leaving it green.
+    @Published private var allDoneJobIDs: Set<UUID> = []
+    var allDoneSummary: AllDoneSummary? {
+        AllDoneSummary.from(jobs.filter { allDoneJobIDs.contains($0.id) })
+    }
+    private var finishedSinceIdle: Set<UUID> = []
+    private var allDoneNotificationID: String?
 
     private var preferenceFingerprint = ""
 
@@ -1045,6 +1058,9 @@ final class AppModel: ObservableObject {
         stopJobDestinationMonitoring(job.id)
         guard job.withdrawDestinationAuthority(reason, root: root, ejected: ejected) else { return }
         retireSafeNotifications(for: job.sourcePath)
+        // Also the only word VoiceOver gets if this lands before the
+        // post-copy check finished and "safe to clear" was still held back.
+        announce("\(job.label): keep the card. Its copies need checking again.")
         _ = persistJournal()   // the warning line travels with the record
         objectWillChange.send()
         updateDockTile()
@@ -2009,6 +2025,7 @@ final class AppModel: ObservableObject {
         updateSleepAssertion()
         updateDockTile()
         startNextQueued()
+        settleAllDoneIfIdle()
     }
 
     // MARK: - Queue controls
@@ -2161,7 +2178,10 @@ final class AppModel: ObservableObject {
             if LooseSourceStaging.isStagedSet(path) {
                 // The engine sees a generic folder; the operator dropped files.
                 ins.format = "loose"
-                ins.formatName = "Loose files"
+                ins.formatName = "Picked files"
+                if let name = LooseSourceStaging.suggestedLabel(for: path) {
+                    ins.suggestedLabel = name
+                }
                 ins.known = false
                 ins.mounts = 0
                 ins.previousDestinations = []
@@ -2725,8 +2745,11 @@ final class AppModel: ObservableObject {
     /// their session is still live. Failing to start the watcher fails closed:
     /// the verdict simply never becomes current.
     private func startBatchAuthorityMonitoring(for job: Job) {
+        // Verified batch cards get the same watcher, so "is this verdict
+        // still about this card" has an answer for them too. It only tracks
+        // freshness: every wipe surface still requires .safeToWipe itself.
         guard sourcePath != job.sourcePath,
-              job.verdict == .safeToWipe,
+              job.verdict == .safeToWipe || job.verdict == .verifiedKeepCard,
               let session = batchSourceSessions[job.sourcePath],
               job.verdictIsFresh(for: session),
               batchAuthorityMonitors[job.sourcePath] == nil else { return }
@@ -3029,13 +3052,16 @@ final class AppModel: ObservableObject {
         playSound(for: job)
         switch job.verdict {
         case .safeToWipe: Haptics.verdictSuccess()
+        case .verifiedKeepCard where !job.verifiedNeedsAttention: Haptics.verdictSuccess()
         case .failed where !job.stopRequested: Haptics.verdictFailure()
-        case .running, .failed, .verifiedKeepCard, .unverified: break
+        case .running, .failed, .unverified, .verifiedKeepCard: break
         }
         if job.verdict == .safeToWipe, !destinationWatchersReady(for: job),
            jobDestinationMonitors[job.id] != nil {
             pendingDestinationNotifications.insert(job.id)
         } else { notify(job: job) }
+        refreshNotificationStatus()
+        noteFinishedForAllDone(job)
         updateSleepAssertion()
         updateDockTile()
         refreshVolumes()  // free-space gauges reflect the bytes just written
@@ -3083,6 +3109,7 @@ final class AppModel: ObservableObject {
         let outstanding = settled.filter { !Self.badVerdictIsSuperseded($0, in: settled) }
         return outstanding.first(where: { $0.verdict == .failed })
             ?? outstanding.first(where: { $0.verdict == .unverified })
+            ?? outstanding.first(where: { $0.verifiedNeedsAttention })
     }
 
     /// Whether a later settled run of the same source path ended without a
@@ -3096,6 +3123,7 @@ final class AppModel: ObservableObject {
                 && later.createdUptime > bad.createdUptime
                 && !later.isRunning
                 && later.verdict != .failed && later.verdict != .unverified
+                && !later.verifiedNeedsAttention
         }
     }
 
@@ -3150,9 +3178,9 @@ final class AppModel: ObservableObject {
             return
         }
 
-        // A dock checkmark is readable across a room as "safe to wipe" — so
-        // ONLY .safeToWipe earns it. VERIFIED · KEEP CARD gets no badge: its
-        // caveat cannot ride on a one-character glyph (agy audit, CRITICAL 2).
+        // A dock checkmark is readable across a room as "safe to clear" — so
+        // ONLY .safeToWipe earns it. Plain VERIFIED gets no badge: "keep the
+        // card" cannot ride on a one-character glyph (agy audit, CRITICAL 2).
         let badge = dockBadge(activeJobCount: 0)
         // Idle gating: no running jobs and nothing to change — skip the
         // WindowServer round-trip entirely (1 Hz timer keeps firing).
@@ -3694,6 +3722,7 @@ final class AppModel: ObservableObject {
     }
 
     private func launch(job: Job, plan: LaunchPlan) {
+        allDoneJobIDs = []  // new work: the last summary is over
         job.phase = .starting
 
         // Create the rendered template folders NOW — validated at plan time,
@@ -4282,10 +4311,78 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// Spoken by VoiceOver; finishing a job had no spoken result at all.
+    private func announce(_ text: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        AccessibilityNotification.Announcement(text).post()
+    }
+
+    /// Macs where the banner can never appear: the column says so once
+    /// instead of leaving a finished job silent (tester feedback, 2026-11-03).
+    func refreshNotificationStatus() {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            let denied = settings.authorizationStatus == .denied
+            Task { @MainActor [weak self] in
+                if self?.notificationsOff != denied { self?.notificationsOff = denied }
+            }
+        }
+    }
+
+    nonisolated static func showsNotificationsOffHint(off: Bool, notifyOnCompletion: Bool,
+                                                      dismissed: Bool, hasLiveJobs: Bool) -> Bool {
+        off && notifyOnCompletion && !dismissed && hasLiveJobs
+    }
+
+    func dismissAllDone() { allDoneJobIDs = [] }
+
+    /// Called for each settled job. When the last running or queued job
+    /// settles, everything that finished since the Mac was last idle becomes
+    /// one summary. Internal for the check suite.
+    func noteFinishedForAllDone(_ job: Job) {
+        guard !job.restoredFromJournal else { return }
+        finishedSinceIdle.insert(job.id)
+        settleAllDoneIfIdle()
+    }
+
+    /// Queued jobs count as running, so a one-at-a-time batch stays open
+    /// until its last card settles or is removed from the queue.
+    func settleAllDoneIfIdle() {
+        guard !jobs.contains(where: { $0.isRunning }) else { return }
+        let finished = jobs.filter { finishedSinceIdle.contains($0.id) }
+        finishedSinceIdle = []
+        allDoneJobIDs = Set(finished.map(\.id))
+        guard let summary = allDoneSummary else { return }
+        announce(summary.line)
+        // Nobody needs a banner for a batch they stopped themselves.
+        guard !finished.allSatisfy({ $0.stopRequested }),
+              Bundle.main.bundleIdentifier != nil,
+              UserDefaults.standard.object(forKey: Pref.notifyOnCompletion) == nil
+                || UserDefaults.standard.bool(forKey: Pref.notifyOnCompletion) else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "Dumptruck"
+        content.body = summary.line
+        // Only the newest batch keeps a banner, so one retirement can never
+        // leave an older all-clear behind.
+        if let previous = allDoneNotificationID {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [previous])
+        }
+        let identifier = "all-done-\(UUID().uuidString)"
+        allDoneNotificationID = identifier
+        let request = UNNotificationRequest(identifier: identifier,
+                                            content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
     private func notify(job: Job) {
         // Completion channels must not send a fresh SAFE claim after the
         // destination check refused current authority, including webhooks.
-        if job.verdict == .safeToWipe, !isCurrentSourceVerdict(job) { return }
+        // VoiceOver is the same claim out loud, so it waits here too.
+        if job.verdict == .safeToWipe, !isCurrentSourceVerdict(job) {
+            announce("\(job.label): verified. Keep the card for now.")
+            return
+        }
+        announce(job.spokenResult)
         // Auto-eject only on the strongest outcome, never on anything lesser.
         if UserDefaults.standard.bool(forKey: Pref.autoEjectWhenSafe),
            job.verdict == .safeToWipe,
@@ -4313,7 +4410,7 @@ final class AppModel: ObservableObject {
         // Bodies come from Verdict.displayLine — the one shared mapping
         // (agy audit HIGH 3; Kimi F15).
         case .verifiedKeepCard:
-            content.body = job.verdict.displayLine
+            content.body = job.verdictLine
             content.categoryIdentifier = hasReport
                 ? CompletionNotification.reportCategory
                 : CompletionNotification.noReportCategory
@@ -4431,6 +4528,13 @@ final class AppModel: ObservableObject {
     /// historical log line. Remove it when this mount path is re-assigned or
     /// changes in place; its action is independently guarded as defense in depth.
     private func retireSafeNotifications(for sourcePath: String) {
+        // The batch line reads its jobs; let the strip redraw, and take back
+        // an all-clear banner that may no longer be true.
+        if !allDoneJobIDs.isEmpty { objectWillChange.send() }
+        if Bundle.main.bundleIdentifier != nil, let id = allDoneNotificationID {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
+            allDoneNotificationID = nil
+        }
         guard Bundle.main.bundleIdentifier != nil else { return }
         let identifiers = jobs
             .filter { $0.sourcePath == sourcePath && $0.verdict == .safeToWipe }
@@ -4654,7 +4758,7 @@ final class AppModel: ObservableObject {
             case .custodyDamaged: return "A later check found a damaged copy — eject asks first"
             case .verifiedNotSafe(_, let singleDrive):
                 return singleDrive ? "Verified to one drive only — keep the card"
-                                   : "Verified, but not safe to wipe — keep the card"
+                                   : "Verified, but not yet safe to clear — keep the card"
             case .verdictNotCurrent: return "The earlier verdict no longer covers this card — eject asks first"
             case .destinationCheckPending: return "Still re-checking the copies — don't wipe yet"
             case .notOffloaded: return "Not offloaded yet — eject asks first"
@@ -4726,6 +4830,24 @@ final class AppModel: ObservableObject {
             return .copiesUnverified(unverifiedCopy, asSource: false)
         }
         return .notOffloaded
+    }
+
+    /// Ejecting only ends a read. When the copy is already verified, or
+    /// nothing has been copied from the volume, the eject control ejects on
+    /// one click with no sheet: asking first there was friction with no
+    /// risk behind it (tester feedback, 2026-11-03). Running, unverified,
+    /// damaged, stale or still-checking cases keep the sheet. canEject and
+    /// every wipe gate are unchanged.
+    func ejectIsHarmless(_ volume: Volume) -> Bool {
+        switch ejectHold(volume) {
+        case .verifiedNotSafe(let job, _):
+            // Only while that verdict still describes the mounted card. A
+            // card changed or re-staged since keeps its "keep the card" sheet,
+            // and so does a result with something to look at.
+            return isCurrentSourceVerdict(job) && !job.verifiedNeedsAttention
+        case .notOffloaded: return true
+        default: return false
+        }
     }
 
     func eject(_ volume: Volume) {

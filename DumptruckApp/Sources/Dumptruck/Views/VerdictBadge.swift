@@ -11,6 +11,9 @@ struct VerdictBadge: View {
     /// it must not stay bright green beside "verify again before wiping"
     /// (Codex GUI review of 0.5.9).
     var authorityWithdrawn = false
+    /// A verified copy with something the operator must look at
+    /// (Job.verifiedNeedsAttention): amber, with its own words.
+    var needsAttention = false
 
     private struct ChipStyle {
         let ink: AnyShapeStyle
@@ -19,7 +22,8 @@ struct VerdictBadge: View {
     }
 
     private var style: ChipStyle {
-        if verdict == .safeToWipe, authorityWithdrawn {
+        if (verdict == .safeToWipe && authorityWithdrawn)
+            || (verdict == .verifiedKeepCard && needsAttention) {
             return ChipStyle(ink: AnyShapeStyle(Semantics.warningText),
                              background: AnyShapeStyle(Semantics.warning.opacity(Semantics.chip)),
                              border: AnyShapeStyle(Semantics.warningText.opacity(0.45)))
@@ -36,14 +40,13 @@ struct VerdictBadge: View {
             return ChipStyle(ink: AnyShapeStyle(Semantics.badgeInk),
                              background: AnyShapeStyle(Semantics.warningText),
                              border: AnyShapeStyle(Color.clear))
-        case .safeToWipe:
+        case .safeToWipe, .verifiedKeepCard:
+            // A verified copy is the good outcome, card clearable or not.
+            // Amber on a clean, verified copy read as a problem (tester
+            // feedback, 2026-11-03).
             return ChipStyle(ink: AnyShapeStyle(Semantics.badgeInk),
                              background: AnyShapeStyle(Semantics.successText),
                              border: AnyShapeStyle(Color.clear))
-        case .verifiedKeepCard:
-            return ChipStyle(ink: AnyShapeStyle(Semantics.warningText),
-                             background: AnyShapeStyle(Semantics.warning.opacity(Semantics.chip)),
-                             border: AnyShapeStyle(Semantics.warningText.opacity(0.45)))
         case .running:
             // Neutral on purpose: the running card already carries indigo
             // chrome, and `.secondaryLabelColor` measures 4.05:1 on white
@@ -53,6 +56,8 @@ struct VerdictBadge: View {
                              border: AnyShapeStyle(Color(nsColor: .separatorColor)))
         }
     }
+
+    static let attentionLine = "VERIFIED · KEEP CARD"
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Latched, not computed from reduceMotion inline: `symbolEffect(value:)`
@@ -67,7 +72,12 @@ struct VerdictBadge: View {
             switch verdict {
             case .unverified:       chip(verdict.displayLine, "exclamationmark.triangle.fill")
             case .safeToWipe:       chip(verdict.displayLine, "checkmark.seal.fill")
-            case .verifiedKeepCard: chip(verdict.displayLine, "externaldrive.badge.exclamationmark")
+            case .verifiedKeepCard:
+                if needsAttention {
+                    chip(Self.attentionLine, "externaldrive.badge.exclamationmark")
+                } else {
+                    chip(verdict.displayLine, "checkmark.seal.fill")
+                }
             case .failed:           chip(verdict.displayLine, "xmark.octagon.fill")
             case .running:          chip(phaseText, "arrow.triangle.2.circlepath")
             }
@@ -82,7 +92,9 @@ struct VerdictBadge: View {
             // fire a bounce on the INCOMING badge if a settled safeToWipe
             // ever changed — unreachable today, but this form needs no such
             // invariant (Opus verification).
-            if !reduceMotion, new == .safeToWipe { bounceTrigger = true }
+            if !reduceMotion, new == .safeToWipe || (new == .verifiedKeepCard && !needsAttention) {
+                bounceTrigger = true
+            }
         }
         .animation(settleAnimation, value: verdict)
         // ONE stable accessibility element out here, so a verdict change
@@ -90,7 +102,9 @@ struct VerdictBadge: View {
         // element out from under the cursor (each switch branch is a
         // distinct subtree — codex review).
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(verdict == .running ? phaseText : verdict.displayLine)
+        .accessibilityLabel(verdict == .running ? phaseText
+                            : (verdict == .verifiedKeepCard && needsAttention
+                               ? Self.attentionLine : verdict.displayLine))
     }
 
     /// A short settle only when a verdict is EARNED. Alarms (failed,
@@ -127,9 +141,10 @@ extension Job.Verdict {
     /// badge vocabulary.
     var railEcho: String? {
         switch self {
-        case .safeToWipe: return "verified · this card can be wiped"
-        case .verifiedKeepCard: return "verified — keep the card"
-        case .unverified, .failed: return "not verified — keep the card"
+        case .safeToWipe: return "verified · safe to clear"
+        case .verifiedKeepCard: return "verified"
+        case .unverified: return "copied, not verified"
+        case .failed: return "failed · keep the card"
         case .running: return nil
         }
     }

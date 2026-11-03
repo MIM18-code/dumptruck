@@ -1167,7 +1167,7 @@ def scenario_flush_failure_names_the_volume(base):
           "DEGRADED" not in doc
           and "FOLIAGE (SMB) is a network share: the server accepted the sync" in doc
           and "network share, counts as one drive: FOLIAGE (SMB)" in doc
-          and "Why keep the card" in doc, doc[doc.find("Durability"):][:900])
+          and "Why not safe to clear" in doc, doc[doc.find("Durability"):][:900])
 
     r, att, doc, receipt = _run({"RAID": local_a, "NAS": nas})
     check("a local drive + the post-house NAS is SAFE TO WIPE",
@@ -3389,16 +3389,30 @@ except OSError:
     report_verdicts79 = report.verdict_display_line
     check("reports use the app's one exact terminal verdict vocabulary",
           report_verdicts79(ok=True, fully_verified=True, safe_to_wipe=True)[0]
-          == "SAFE TO WIPE"
+          == "VERIFIED · SAFE TO CLEAR"
           and report_verdicts79(ok=True, fully_verified=True,
                                 safe_to_wipe=False)[0]
-          == "VERIFIED · KEEP CARD"
+          == "VERIFIED"
+          and report_verdicts79(ok=True, fully_verified=True, safe_to_wipe=False,
+                                blockers=["picked files: this run copied chosen files, not a whole card",
+                                          "copies span only 1 known physical device(s); 2+ required"])[0]
+          == "VERIFIED"
+          and report_verdicts79(ok=True, fully_verified=True, safe_to_wipe=False,
+                                blockers=["copies span only 1 known physical device(s); 2+ required",
+                                          "source tree changed after the initial scan"])
+          == ("VERIFIED · KEEP CARD", "warn")
+          and report_verdicts79(ok=True, fully_verified=True, safe_to_wipe=False,
+                                blockers=["no destination copy was fully read this run"])
+          == ("VERIFIED · KEEP CARD", "warn")
+          and report_verdicts79(ok=True, fully_verified=True, safe_to_wipe=False,
+                                blockers=["a reason added by some later version"])
+          == ("VERIFIED · KEEP CARD", "warn")
           and report_verdicts79(ok=True, fully_verified=False,
                                 safe_to_wipe=False)[0]
-          == "UNVERIFIED — KEEP CARD"
+          == "COPIED · NOT VERIFIED"
           and report_verdicts79(ok=False, fully_verified=False,
                                 safe_to_wipe=False)[0]
-          == "FAILED — DO NOT WIPE")
+          == "FAILED · KEEP CARD")
 
     print("[80] registry and ARRI MXF fallback are explicit and fail honestly")
     check("RAW probe registry covers BRAW, R3D, ARI, ARX, and ARRI",
@@ -3570,13 +3584,13 @@ except OSError:
           and done82.get("event") == "offload_complete"
           and done82.get("fully_verified") is True,
           (p82.stdout + p82.stderr)[-600:])
-    check("loose source is recognized as 'Loose files', never a known card",
-          recognized82.get("format") == "Loose files"
+    check("loose source is recognized as 'Picked files', never a known card",
+          recognized82.get("format") == "Picked files"
           and recognized82.get("known") is False and recognized82.get("mounts") == 0,
           str(recognized82))
     check("loose offload is never wipe-authorized and says why",
           att82.get("safe_to_wipe_source") is False
-          and any(b.startswith("loose files:") for b in att82.get("safe_to_wipe_blockers", []))
+          and any(b.startswith("picked files:") for b in att82.get("safe_to_wipe_blockers", []))
           and done82.get("safe_to_wipe_source") is False,
           str(att82.get("safe_to_wipe_blockers")))
     with open(os.path.join(home82, "datasets.json")) as f:
@@ -3722,7 +3736,7 @@ except OSError:
               "A_VERY_LONG_PROJECT_NAME_FOR_THE_WRAP_REPORT/Raws/SHOOT_DAY_ONE" in flat84, flat84[:800])
         check("PDF text keeps the label, verdict, wipe and runtime columns",
               "R2_WRAP_CARD_WITH_A_LONG_LABEL" in flat84 and "safe_to_wipe_source=false" in flat84
-              and "KEEPCARD" in flat84 and "RUNTIME" in flat84.upper(), flat84[:800])
+              and "VERIFIED" in flat84 and "RUNTIME" in flat84.upper(), flat84[:800])
     else:
         print("  NOTE  wrap PDF text check skipped (chrome or pdftotext unavailable)")
 
@@ -3924,7 +3938,7 @@ else:
               and att90.get("source_read_count") == 2, (p90.stdout + p90.stderr)[-600:])
         check("a selection offload is never wipe-authorized",
               att90.get("safe_to_wipe_source") is False
-              and any(b.startswith("loose files:") for b in att90.get("safe_to_wipe_blockers", [])),
+              and any(b.startswith("picked files:") for b in att90.get("safe_to_wipe_blockers", [])),
               str(att90.get("safe_to_wipe_blockers")))
         for root in (d90a, d90b):
             card90 = os.path.join(root, "PICKED90")

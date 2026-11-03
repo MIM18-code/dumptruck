@@ -13,6 +13,8 @@ struct FlowColumn: View {
     /// IDs recorded at press time, never a time watermark, for the reasons
     /// ReceiptVisibility gives. History keeps every record.
     @State private var clearedLiveJobIDs: Set<UUID> = []
+    @AppStorage(Pref.notifyOnCompletion) private var notifyOnCompletion = true
+    @AppStorage("notificationsHintDismissed") private var notificationsHintDismissed = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -71,6 +73,14 @@ struct FlowColumn: View {
                     BenchCard()
                         .padding(.horizontal, 14).padding(.top, 12)
                 }
+                if let done = model.allDoneSummary {
+                    allDoneStrip(done)
+                }
+                if AppModel.showsNotificationsOffHint(
+                    off: model.notificationsOff, notifyOnCompletion: notifyOnCompletion,
+                    dismissed: notificationsHintDismissed, hasLiveJobs: !liveJobs.isEmpty) {
+                    notificationsOffHint
+                }
                 ScrollView {
                     LazyVStack(spacing: 12) {
                         if !clearable.isEmpty {
@@ -110,6 +120,7 @@ struct FlowColumn: View {
                 let current = Set(allLive.map(\.id))
                 clearedLiveJobIDs = clearedLiveJobIDs.intersection(current)
                     .union(clearable.map(\.id))
+                model.dismissAllDone()
             }
             .buttonStyle(.link).hoverHighlight()
             .font(.caption)
@@ -118,11 +129,56 @@ struct FlowColumn: View {
         }
     }
 
+    private func allDoneStrip(_ done: AllDoneSummary) -> some View {
+        let tint: Color
+        let symbol: String
+        switch done.tone {
+        case .good: tint = Semantics.successText; symbol = "checkmark.seal.fill"
+        case .attention: tint = Semantics.warningText; symbol = "exclamationmark.triangle.fill"
+        case .failed: tint = Semantics.dangerText; symbol = "xmark.octagon.fill"
+        }
+        return HStack(spacing: 8) {
+            Label(done.line, systemImage: symbol)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(tint)
+            Spacer()
+            Button { model.dismissAllDone() } label: { Image(systemName: "xmark") }
+                .buttonStyle(HoverHighlightButtonStyle())
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Dismiss summary")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(tint.opacity(Semantics.wash), in: .rect(cornerRadius: 8))
+        .padding(.horizontal, 14).padding(.top, 10)
+    }
+
+    private var notificationsOffHint: some View {
+        HStack(spacing: 8) {
+            Label("Notifications are off for Dumptruck, so finished jobs won't pop up.",
+                  systemImage: "bell.slash")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Turn On…") {
+                let id = Bundle.main.bundleIdentifier ?? ""
+                if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(id)") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            .buttonStyle(.link)
+            .font(.caption)
+            Button { notificationsHintDismissed = true } label: { Image(systemName: "xmark") }
+                .buttonStyle(HoverHighlightButtonStyle())
+                .foregroundStyle(.tertiary)
+                .accessibilityLabel("Don't show this again")
+        }
+        .padding(.horizontal, 14).padding(.top, 8)
+    }
+
     /// Fast mode is a day-long trap if it's only visible in Settings (Kimi
     /// K3 review): an ambient strip while it is active.
     private var fastModeStrip: some View {
-        Label("Fast mode: size checked only — not verified. No card can be "
-              + Job.Verdict.safeToWipe.displayLine,
+        Label("Fast mode is on: copies are size-checked, not verified",
               systemImage: "hare.fill")
             .font(Typo.safety)
             .frame(maxWidth: .infinity)
@@ -376,12 +432,13 @@ struct ReceiptRow: View {
                             .help(later.line)
                     }
                     VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
-                             authorityWithdrawn: job.destinationAuthorityWithdrawn != nil)
+                             authorityWithdrawn: job.destinationAuthorityWithdrawn != nil,
+                             needsAttention: job.verifiedNeedsAttention)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(HoverHighlightButtonStyle())
-            .accessibilityLabel("\(job.label), \(job.verdict.displayLine)"
+            .accessibilityLabel("\(job.label), \(job.verdictLine)"
                 + (job.laterVerification.map { ", \($0.line)" } ?? "")
                 + ", \(expanded ? "expanded" : "collapsed")")
             .accessibilityHint(expanded ? "Collapses this prior job"
@@ -415,6 +472,7 @@ struct BenchCard: View {
     /// The operator asked for the full bench instead of the one-click
     /// continuation — per card, reset when the source changes.
     @State private var proposalDismissed = false
+    @AppStorage(Pref.simpleView) private var simpleView = true
 
     var body: some View {
         Group {
@@ -576,7 +634,7 @@ struct BenchCard: View {
                     .overlay(RoundedRectangle(cornerRadius: 8)
                         .strokeBorder(Semantics.source.opacity(0.35)))
                     .foregroundStyle(Semantics.sourceText)
-                } else {
+                } else if !simpleView {
                     Label("New card", systemImage: "sparkles")
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -611,11 +669,13 @@ struct BenchCard: View {
                     .textFieldStyle(.roundedBorder)
                     .monospaced()
                     .frame(minWidth: 130, idealWidth: 220, maxWidth: 220)
-                Text("← continuation key")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .fixedSize()
+                if !simpleView {
+                    Text("← continuation key")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
                 Spacer()
             }
             PlannedLaneGroup()
@@ -873,11 +933,14 @@ struct JobCard: View {
 
 private struct JobMessagesView: View {
     @ObservedObject var job: Job
+    @AppStorage(Pref.simpleView) private var simpleView = true
     @State private var page = 0
     @State private var exporting = false
     @State private var exportError: String?
 
     var body: some View {
+        // Warnings alone stay one quiet grey line, because some still matter
+        // (a report that failed, a skipped file). Errors always show, in red.
         if !job.messages.isEmpty {
             DisclosureGroup {
                 VStack(alignment: .leading, spacing: 6) {
@@ -909,10 +972,13 @@ private struct JobMessagesView: View {
                     if let exportError { Text(exportError).foregroundStyle(Semantics.dangerText) }
                 }
             } label: {
-                Text("\(job.errorCount) \(job.errorCount == 1 ? "error" : "errors") · "
-                     + "\(job.warningCount) \(job.warningCount == 1 ? "warning" : "warnings")")
+                Text(simpleView && job.errorCount == 0
+                     ? "\(job.warningCount) \(job.warningCount == 1 ? "note" : "notes")"
+                     : "\(job.errorCount) \(job.errorCount == 1 ? "error" : "errors") · "
+                       + "\(job.warningCount) \(job.warningCount == 1 ? "warning" : "warnings")")
                     .font(Typo.safety.monospacedDigit())
-                    .foregroundStyle(job.errorCount > 0 ? Semantics.dangerText : Semantics.warningText)
+                    .foregroundStyle(job.errorCount > 0 ? AnyShapeStyle(Semantics.dangerText)
+                                                        : AnyShapeStyle(.secondary))
             }
         }
     }
@@ -965,6 +1031,7 @@ struct JobHeaderBand: View {
     @State private var evidenceSheetShown = false
     @State private var quickLookURL: URL?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage(Pref.simpleView) private var simpleView = true
 
     /// Drives the rolling-digit readouts. nil under Reduce Motion.
     private var digitAnimation: Animation? {
@@ -985,7 +1052,8 @@ struct JobHeaderBand: View {
                     .lineLimit(1).truncationMode(.middle)
                 Spacer()
                 VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
-                             authorityWithdrawn: job.destinationAuthorityWithdrawn != nil)
+                             authorityWithdrawn: job.destinationAuthorityWithdrawn != nil,
+                             needsAttention: job.verifiedNeedsAttention)
                     .layoutPriority(1)
             }
             if job.hasCustodyFailure {
@@ -1073,7 +1141,7 @@ struct JobHeaderBand: View {
                 Text("\(Int(job.fraction * 100))%")
             }
             .font(Typo.evidenceQuiet.monospacedDigit()).foregroundStyle(.secondary)
-            speedometerRow
+            if showsSpeedRow { speedometerRow }
         } else if job.phase == .sourceVerify, job.rereadTotal > 0 {
             let frac = Double(job.rereadDone) / Double(job.rereadTotal)
             ProgressView(value: frac)
@@ -1082,7 +1150,7 @@ struct JobHeaderBand: View {
                     MilestoneTicksOverlay(fraction: frac)
                 }
             HStack(spacing: 10) {
-                Text("re-reading the card to prove the copy")
+                Text("checking the card a second time")
                 Text("·")
                 Text("\(bytesString(job.rereadDone)) of \(bytesString(job.rereadTotal))")
                     .contentTransition(.numericText())
@@ -1097,13 +1165,18 @@ struct JobHeaderBand: View {
                     .animation(digitAnimation, value: Int(frac * 100))
             }
             .font(Typo.evidenceQuiet.monospacedDigit()).foregroundStyle(.secondary)
-            speedometerRow
+            if showsSpeedRow { speedometerRow }
         } else if job.phase == .reports {
             // Manifest/report sealing is genuinely indeterminate — the bar
             // must never sit pinned at 100% while safety work is underway.
             ProgressView().progressViewStyle(.linear)
                 .tint(Semantics.running)
-            sealingChecklist
+            if simpleView && !job.reportFailed {
+                Text("Finishing up…")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                sealingChecklist
+            }
         } else {
             ProgressView().progressViewStyle(.linear)
                 .tint(Semantics.running)
@@ -1207,7 +1280,17 @@ struct JobHeaderBand: View {
         }
         // A quiet, entirely optional nudge: the games exist and now is the
         // one moment they're useful. Caption-weight, dismiss-free, and it
-        // never renders on a finished card.
+        // never renders on a finished card. Simple view leaves it out.
+        if !simpleView { arcadeNudge }
+    }
+
+    /// Simple view keeps the speed graph off the card, except when the
+    /// transfer has stalled long enough that the operator should look.
+    private var showsSpeedRow: Bool {
+        !simpleView || job.stallSeconds >= 120
+    }
+
+    private var arcadeNudge: some View {
         Button {
             model.arcadeShown = true
         } label: {
@@ -1350,11 +1433,48 @@ struct JobHeaderBand: View {
             : "flushed to media"
     }
 
+    /// Files picked off a drive or dropped from the Mac: there is no whole
+    /// card behind the job, so it never carries "keep the card" advice.
+    private var isPickedFiles: Bool { LooseSourceStaging.isStagedSet(job.sourcePath) }
+
+    private var verifiedHeadline: String {
+        if job.verdict == .safeToWipe { return "Verified. Safe to clear the card." }
+        // Trusted files were accepted on recorded history and not read this
+        // run, so they are never part of a "verified" count.
+        let trusted = job.trustedPrior
+        let checked = max(0, job.filesCopied + job.filesSkipped - trusted)
+        let files = checked == 1 ? "1 file" : "\(checked) files"
+        if trusted > 0 {
+            return "Verified \(files). \(trusted) from earlier offloads weren't re-read."
+        }
+        if checked == 0 { return "Verified." }
+        return checked == 1 ? "Verified. The file is on every drive."
+                            : "Verified. All \(checked) files are on every drive."
+    }
+
+    /// Why a verified card is not yet clearable, collapsed by default. The
+    /// engine's reasons are proof for whoever asks, not a list of warnings
+    /// on a good result (tester feedback, 2026-11-03).
+    private func reasonsDisclosure(_ title: String, tint: Color) -> some View {
+        DisclosureGroup {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(job.wipeBlockers, id: \.self) { b in
+                    Text(Job.plainWipeBlocker(b))
+                        .font(Typo.evidenceQuiet)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            Text(title)
+                .font(Typo.safetyBody)
+                .foregroundStyle(tint)
+        }
+    }
+
     @ViewBuilder
     private var finishedBody: some View {
-        // The verdict carries its proof (or its blockers) inline — the
-        // operator should be able to defend the badge without opening the
-        // report (Kimi K3 review).
         if job.verdict == .safeToWipe, job.destinationAuthorityWithdrawn != nil {
             // Historical proof, no mascot: the copies it describes are no
             // longer where the verdict left them.
@@ -1362,37 +1482,70 @@ struct JobHeaderBand: View {
                   systemImage: "clock.arrow.circlepath")
                 .font(Typo.safetyBody)
                 .foregroundStyle(.secondary)
-        } else if job.verdict == .safeToWipe {
+        } else if job.verifiedNeedsAttention {
+            // Not plain good news, and on picked files too: a file changed
+            // or left behind matters whatever the source was. No mascot, and
+            // the reasons stay open. (A custody failure already has its red
+            // line above the body.)
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(job.attentionBlockers, id: \.self) { b in
+                    Label(Job.plainWipeBlocker(b), systemImage: "info.circle")
+                        .font(Typo.safety)
+                        .foregroundStyle(Semantics.warningText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        } else if job.verdict == .safeToWipe || job.verdict == .verifiedKeepCard {
+            // Every clean verified finish gets the same done moment: green
+            // line, dump animation. Clearing the card is the bonus on top.
             HStack(alignment: .center, spacing: 8) {
-                Label("\(job.physicalDevices) physical \(job.physicalDevices == 1 ? "device" : "devices") · source read twice · \(flushProof)",
-                      systemImage: "checkmark.circle")
-                    .font(Typo.safetyBody)
-                    .foregroundStyle(Semantics.successText)
+                VStack(alignment: .leading, spacing: 3) {
+                    Label(verifiedHeadline, systemImage: "checkmark.circle")
+                        .font(Typo.safetyBody)
+                        .foregroundStyle(Semantics.successText)
+                    if job.verdict == .safeToWipe, !simpleView {
+                        Text("\(job.physicalDevices) physical \(job.physicalDevices == 1 ? "device" : "devices") · source read twice · \(flushProof)")
+                            .font(Typo.evidenceQuiet)
+                            .foregroundStyle(.secondary)
+                    }
+                    if job.verdict == .verifiedKeepCard, !isPickedFiles,
+                       !job.wipeBlockers.isEmpty {
+                        reasonsDisclosure("Keep the card for now", tint: .secondary)
+                    }
+                }
                 Spacer()
                 TruckDumpView(checkCount: 12)
                     .id(job.id)
                     .frame(width: 120, height: 44)
                     .accessibilityHidden(true)
             }
-        } else if job.verdict != .failed, !job.wipeBlockers.isEmpty {
-            // No mascot on a failed card (2026-08-26 facelift): a cartoon
-            // next to DO NOT WIPE undercuts the one message that must land
-            // with full weight — the fun layer never shares a frame with an
-            // alarm. (Failed cards also suppress wipe blockers, as before:
-            // the filled FAILED badge already forbids the wipe.)
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(job.wipeBlockers, id: \.self) { b in
-                    Label(b, systemImage: "info.circle")
-                        .font(Typo.safety)
-                        .foregroundStyle(Semantics.warningText)
-                }
+        } else if job.verdict == .failed,
+                  let reason = job.messages.first(where: { $0.severity == .error })?.text {
+            // Say why on the card's face; a failure is the one moment nobody
+            // should have to open a list to learn what happened.
+            Text(reason)
+                .font(Typo.safetyBody)
+                .foregroundStyle(Semantics.dangerText)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        } else if job.verdict == .unverified {
+            // No mascot: the copy exists but was not read back.
+            if job.wipeBlockers.isEmpty {
+                Text("Copied, but not checked byte for byte. Keep the card.")
+                    .font(Typo.safetyBody)
+                    .foregroundStyle(Semantics.warningText)
+            } else {
+                reasonsDisclosure("Copied, but not checked byte for byte. Keep the card.",
+                                  tint: Semantics.warningText)
             }
         }
         // Counts on their own line, actions on theirs: sharing one row
         // wrapped the counts into three lines beside "Eject Sour…" and
         // "Open Re…" at the 685pt center width (2026-09-04 UI audit).
         HStack(spacing: 8) {
-            Text("\(job.filesCopied) copied · \(job.filesSkipped) already offloaded"
+            Text("\(job.filesCopied) copied"
+                 + (job.filesSkipped > 0 ? " · \(job.filesSkipped) already offloaded" : "")
                  + (job.trustedPrior > 0 ? " (\(job.trustedPrior) trusted, not re-read)" : "")
                  + (job.filesFailed > 0 ? " · \(job.filesFailed) FAILED" : ""))
                 .font(job.filesFailed > 0
@@ -1612,7 +1765,7 @@ struct DestinationLane: View {
             if progress.sizeOnly > 0 { parts.append("\(progress.sizeOnly) size checked only — not verified") }
             if progress.filesFailed > 0 { parts.append("\(progress.filesFailed) FAILED") }
             if parts.isEmpty {
-                parts.append(job.isRunning ? "waiting for engine evidence" : "no engine evidence")
+                parts.append(job.isRunning ? "waiting…" : "no results recorded")
             }
             // Capacity outranks relative-speed commentary (agy audit 9).
             if let warning = lowSpaceWarning { parts.append(warning) }

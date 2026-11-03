@@ -4,7 +4,7 @@ Checksum-verified camera media offloading for macOS. Dumptruck copies media to
 backup drives, verifies the copies, and records the results in reports and
 ASC MHL manifests. The app has no erase function.
 
-"SAFE TO WIPE" means the job met the engine's verification criteria at the time
+"VERIFIED · SAFE TO CLEAR" means the job met the engine's verification criteria at the time
 of the check. It is not a guarantee against later hardware failure, missing
 source material, or every form of data loss. Review the evidence and your
 backup requirements before erasing original media. The software is provided

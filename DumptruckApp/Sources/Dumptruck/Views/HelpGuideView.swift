@@ -15,13 +15,17 @@ struct HelpGuideView: View {
                     Dumptruck copies camera cards to your drives and proves the \
                     copies are real. In the default Full verification, every new \
                     file is written, flushed to the disk, then read back and \
-                    compared against the source, byte for byte. SAFE TO WIPE \
-                    appears only when every file was verified this run on two \
-                    separate physical drives and every honesty check passed. \
-                    Until then the verdict says KEEP CARD.
+                    compared against the source, byte for byte. When that \
+                    passes, the job turns green and says VERIFIED. If the copies \
+                    are also on two separate drives, it adds SAFE TO CLEAR: you \
+                    can format the card.
 
-                    Dumptruck never deletes anything from a card. The worst it can \
-                    do is refuse to tell you a wipe is safe.
+                    Dumptruck never deletes anything from a card.
+
+                    Simple view (View menu, on by default) shows progress and \
+                    the result and leaves out speed graphs and step-by-step \
+                    detail. Errors and anything that needs a look always show. \
+                    Copying and checking work the same either way.
                     """)
 
                     section("Your first offload", """
@@ -32,13 +36,12 @@ struct HelpGuideView: View {
                     source too, via "Choose Source Folder…" at the bottom of \
                     the left rail or the folder button on a drive's tile. To \
                     copy only some clips, use "Choose Source Files…" or drag \
-                    the files onto the left rail. Clips on a drive copy \
-                    straight from it; they are never marked safe to wipe.
+                    the files onto the left rail.
 
                     2.  Click Destination on two drives' tiles. They move to \
-                    the right rail. Two, because one copy on one drive is not \
-                    a backup. SAFE TO WIPE requires two separate physical \
-                    devices, and two partitions on the same disk do not count. \
+                    the right rail. One drive works; two separate drives are \
+                    what let Dumptruck say a card is safe to clear. Two \
+                    partitions on the same disk count as one. \
                     A network share (a NAS over SMB, for example) counts as \
                     one drive once its copy is verified, as long as it is \
                     another machine. For SMB, Dumptruck checks which server \
@@ -59,19 +62,22 @@ struct HelpGuideView: View {
                     """)
 
                     section("Reading the verdict", """
-                    SAFE TO WIPE means every file on the card was verified this \
-                    run on two or more independent drives, the card did not \
-                    change while it was being read, and every honesty check \
-                    passed. You can format the card.
+                    VERIFIED means every file copied and read back correctly on \
+                    every drive.
 
-                    VERIFIED · KEEP CARD means the copies are good but the full \
-                    bar was not met. Usually that is one destination instead of \
-                    two, or a top-up where older files were trusted instead of \
-                    re-read. The line under the verdict lists exactly what is \
-                    missing.
+                    VERIFIED · SAFE TO CLEAR adds that the copies are on two or \
+                    more separate drives, the card was read twice and did not \
+                    change. You can format the card. When a verified card is \
+                    not yet clearable, "Keep the card for now" under the \
+                    verdict opens to say why, usually one drive instead of two.
 
-                    UNVERIFIED — KEEP CARD and FAILED — DO NOT WIPE mean what \
-                    they say. The job card keeps the reason.
+                    VERIFIED · KEEP CARD in amber means something needs a look \
+                    even though the copies checked out, such as a file that \
+                    changed mid-copy or a later check that found damage. The \
+                    job card says what.
+
+                    COPIED · NOT VERIFIED (Fast mode) and FAILED · KEEP CARD \
+                    mean what they say. The job card keeps the reason.
 
                     The verdict comes from the copy engine's own attestation, \
                     never from a progress bar reaching 100%.
@@ -85,11 +91,9 @@ struct HelpGuideView: View {
                     run are listed as "trusted" and skipped instead of copied \
                     twice.
 
-                    A top-up job can finish green and verified while SAFE TO \
-                    WIPE stays off. That is deliberate. Trusting last week's \
-                    copies is not the same as reading them, so wipe permission \
-                    on a continued card requires the re-verify option (Settings \
-                    › Transfers), which re-reads everything.
+                    A top-up finishes VERIFIED. SAFE TO CLEAR needs the older \
+                    files read again too, which the re-verify option (Settings \
+                    › Transfers) does.
                     """)
 
                     section("Batch sources", """
@@ -112,20 +116,13 @@ struct HelpGuideView: View {
                     check labels and start.
                     """)
 
-                    section("Loose files", """
-                    Files work too. Drop a few clips from Downloads or the \
-                    desktop on the left rail and they stage as one set, named \
-                    by the time you dropped them; rename it like any card. The \
-                    set is a folder of instant clones on this Mac's disk, so \
-                    nothing is copied until you start, and the originals are \
-                    never touched. A file still up in iCloud has to be \
-                    downloaded before it can be dropped. Files drop flat: two \
-                    files with the same \
-                    name are refused rather than renamed, and files on another \
-                    drive are refused too, since the drive itself should be \
-                    the source there. A finished set never shows SAFE TO WIPE. \
-                    There is no card to wipe, and the clones clean themselves \
-                    up once the copy is verified.
+                    section("Picked files", """
+                    Drag clips onto the left rail, from a camera drive, \
+                    Downloads or anywhere else, and they copy like any card. \
+                    The set is named after the folder they came from; rename \
+                    it if you like. A finished set says VERIFIED when every \
+                    file checks out. A file still in iCloud has to be \
+                    downloaded first.
                     """)
                 }
                 Group {
@@ -150,12 +147,11 @@ struct HelpGuideView: View {
                     """)
 
                     section("Ejecting drives and cards", """
-                    A card with a current SAFE TO WIPE verdict gets a one-click \
-                    eject right on its job card. Everything else asks first, in \
-                    plain words: which job is still writing or which copy is \
-                    unproven, and what pulling the card now means. One click \
-                    past that warning ejects. The app will not pull a card it \
-                    cannot vouch for without telling you why.
+                    A card that is verified, or that nothing has been copied \
+                    from yet, ejects in one click. Dumptruck only asks first \
+                    when ejecting could matter: a job is still using the \
+                    drive, the copies are unproven or damaged, or the verdict \
+                    no longer covers the card.
                     """)
 
                     section("Reports", """
@@ -186,7 +182,7 @@ struct HelpGuideView: View {
                     Dock icon carries live progress and a count of running \
                     jobs; a warning badge from any job in this session \
                     outranks both, and a checkmark appears only while the \
-                    staged card's SAFE verdict is current.
+                    staged card's SAFE TO CLEAR verdict is current.
                     """)
                 }
                 Group {
@@ -198,14 +194,14 @@ struct HelpGuideView: View {
                     Verification level. Two curated bundles and a Custom \
                     escape hatch. Standard is the working DIT bar: full byte \
                     verification plus a second source read. That makes a \
-                    fresh card eligible for SAFE TO WIPE; the verdict itself \
+                    fresh card eligible for SAFE TO CLEAR; the verdict itself \
                     still requires two separate physical drives and every \
                     runtime check passing. Maximum turns everything on: \
                     prior offloads are re-read instead of trusted, and MD5, \
                     SHA-1, SHA-256 and C4 ride along with xxHash64, recorded \
                     in the receipt JSON as long as reports stay on. Maximum \
                     is required before a continuation card can earn SAFE TO \
-                    WIPE, and is the right level when a delivery spec asks \
+                    CLEAR, and is the right level when a delivery spec asks \
                     for specific checksums (keep reports enabled so they \
                     persist). Touching any individual control below switches \
                     the level to Custom; nothing is changed behind your back.
@@ -227,13 +223,13 @@ struct HelpGuideView: View {
                     read; with re-verify on, that covers the whole card. It \
                     is what catches \
                     a dying card or a flaky reader that returns different bytes \
-                    on different reads. Turning it off forfeits SAFE TO WIPE \
+                    on different reads. Turning it off forfeits SAFE TO CLEAR \
                     for the run.
 
                     Re-verify previously offloaded files. On a top-up, re-read \
                     the old files at the destinations instead of trusting the \
                     sealed history. Slower on big continuation cards, and \
-                    required before a continued card can earn SAFE TO WIPE. \
+                    required before a continued card can earn SAFE TO CLEAR. \
                     Also the right tool when a destination drive has been out \
                     of your hands.
 
@@ -245,7 +241,7 @@ struct HelpGuideView: View {
                     them to outlive the job.
 
                     Auto-eject. Ejects the card by itself, but only after the \
-                    full SAFE TO WIPE bar: complete verification on two or more \
+                    full SAFE TO CLEAR bar: complete verification on two or more \
                     physical devices. Any lesser outcome leaves the card \
                     mounted.
                     """)
