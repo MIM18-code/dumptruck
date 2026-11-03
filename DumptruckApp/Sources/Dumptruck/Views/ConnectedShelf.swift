@@ -295,7 +295,8 @@ private struct ShelfTile: View {
     }
 
     private var displayName: String {
-        endpoint.kind == .folder
+        if let picked = LooseSourceStaging.displayName(for: endpoint.path) { return picked }
+        return endpoint.kind == .folder
             ? volumeRelativePath(endpoint.path)
             : model.endpointDisplayName(endpoint.path)
     }

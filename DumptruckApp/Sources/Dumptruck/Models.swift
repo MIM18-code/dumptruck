@@ -318,6 +318,7 @@ final class Job: ObservableObject, Identifiable {
     var hasCustodyFailure: Bool { !custodyFailures.isEmpty }
     var currentCustodyEcho: String? {
         if hasCustodyFailure { return "custody check failed, keep the card" }
+        if stoppedByOperator { return "stopped · keep the card" }
         return verifiedNeedsAttention ? "verified · keep the card" : verdict.railEcho
     }
 
@@ -948,6 +949,15 @@ final class Job: ObservableObject, Identifiable {
             }
         }
     }
+    /// The operator pressed Stop and nothing else went wrong: still FAILED
+    /// for every safety decision, but shown as what it is. A transfer the
+    /// tester stopped on purpose read as an alarm (beta tester, 2026-11-03).
+    static let stoppedMessage = "You stopped this copy before it finished."
+
+    var stoppedByOperator: Bool {
+        stopRequested && verdict == .failed && !hasCustodyFailure && filesFailed == 0
+    }
+
     var verdict: Verdict {
         Verdict.from(phase: phase, fullyVerified: fullyVerified,
                      safeToWipe: safeToWipe, filesFailed: filesFailed)

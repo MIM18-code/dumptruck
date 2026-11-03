@@ -41,8 +41,66 @@ enum DesktopQACheck {
         }
     }
 
+    /// A settled card, failed included, can be dismissed; a running one
+    /// cannot; a later alarm brings a dismissed card back (beta tester,
+    /// 2026-11-03: a stopped transfer had no way off the screen).
+    @MainActor
+    static func dismissalRule() {
+        let failed = Job(label: "STOPPED", sourcePath: "/Volumes/CARD", destinations: ["/Volumes/D/X"])
+        failed.phase = .failed
+        failed.stopRequested = true
+        let key = JobDismissal.alarmKey(failed)
+        require(JobDismissal.isHidden(failed, dismissedAs: key), "a dismissed failed card hides")
+        require(!JobDismissal.isHidden(failed, dismissedAs: nil), "an undismissed card shows")
+        // As recordLaterVerification files damage: on the job and by lane.
+        let later = LaterVerification(
+            date: Date(), folder: "/Volumes/D/X", passed: 0, failed: 1, missing: 0,
+            new: 0, unverifiable: 0, chainProblems: 0)
+        failed.laterVerification = later
+        failed.custodyFailures["/Volumes/D/X"] = later
+        require(!JobDismissal.isHidden(failed, dismissedAs: key),
+                "a damage finding after the dismissal brings the card back")
+        // A stop the operator chose reads as a stop, and Clear Finished may
+        // take it; a stop on top of a damaged file stays a failure.
+        let stopped = Job(label: "STOP2", sourcePath: "/Volumes/CARD", destinations: ["/Volumes/D/X"])
+        stopped.phase = .failed
+        stopped.stopRequested = true
+        require(stopped.verdict == .failed, "a stop is still FAILED for every safety decision")
+        require(stopped.stoppedByOperator, "a plain stop reads as stopped")
+        require(stopped.currentCustodyEcho == "stopped · keep the card", "the rail says stopped")
+        require(LiveJobClearing.isClearable(stopped), "Clear Finished takes a stopped card")
+        let crashed = Job(label: "FAIL", sourcePath: "/Volumes/CARD", destinations: ["/Volumes/D/X"])
+        crashed.phase = .failed
+        require(!crashed.stoppedByOperator && !LiveJobClearing.isClearable(crashed),
+                "a real failure is not a stop and stays on screen")
+        let fast = Job(label: "FAST", sourcePath: "/Volumes/CARD", destinations: ["/Volumes/D/X"])
+        fast.phase = .done
+        require(fast.verdict == .unverified && LiveJobClearing.isClearable(fast),
+                "a clean Fast-mode copy clears with the rest")
+        require(fileCount(1) == "1 file" && fileCount(3) == "3 files", "file counts read right at one")
+        // Damage on a second destination after the dismissal is a new alarm.
+        let damaged = Job(label: "DMG", sourcePath: "/Volumes/CARD",
+                          destinations: ["/Volumes/A/X", "/Volumes/B/X"])
+        damaged.phase = .failed
+        func finding(_ folder: String, _ t: Double) -> LaterVerification {
+            LaterVerification(date: Date(timeIntervalSince1970: t), folder: folder, passed: 0,
+                              failed: 1, missing: 0, new: 0, unverifiable: 0, chainProblems: 0)
+        }
+        damaged.custodyFailures["/Volumes/A/X"] = finding("/Volumes/A/X", 1)
+        let damagedKey = JobDismissal.alarmKey(damaged)
+        require(JobDismissal.isHidden(damaged, dismissedAs: damagedKey), "dismissed with A damaged")
+        damaged.custodyFailures["/Volumes/B/X"] = finding("/Volumes/B/X", 2)
+        require(!JobDismissal.isHidden(damaged, dismissedAs: damagedKey),
+                "damage on B after the dismissal brings the card back")
+        let running = Job(label: "RUN", sourcePath: "/Volumes/CARD", destinations: ["/Volumes/D/X"])
+        running.phase = .copying
+        require(!JobDismissal.isHidden(running, dismissedAs: JobDismissal.alarmKey(running)),
+                "a running card never hides")
+    }
+
     @MainActor
     static func run() async throws {
+        dismissalRule()
         let fm = FileManager.default
         let root = fm.temporaryDirectory
             .appendingPathComponent("dumptruck-desktop-qa-check-\(UUID().uuidString)")

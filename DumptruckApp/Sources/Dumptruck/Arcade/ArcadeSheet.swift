@@ -171,7 +171,8 @@ private struct ArcadeJobStatus: View {
             Spacer()
             VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
                          authorityWithdrawn: job.destinationAuthorityWithdrawn != nil,
-                             needsAttention: job.verifiedNeedsAttention)
+                             needsAttention: job.verifiedNeedsAttention,
+                         stopped: job.stoppedByOperator)
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 8))

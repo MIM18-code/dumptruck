@@ -79,6 +79,7 @@ public struct BatchSourceStagingView: View {
             do {
                 let split = try AppModel.splitDroppedPaths(urls.map(\.path))
                 guard !split.ordered.isEmpty else { return false }
+                model.removeCandidatesNarrowed(byDropped: urls.map(\.path))
                 stagingModel.addCandidates(paths: split.ordered, appModel: model)
                 Haptics.alignment()
                 return true
@@ -174,7 +175,7 @@ public struct BatchSourceStagingView: View {
             }
 
             if stagingModel.totalCandidateBytes > 0 {
-                Text("Total: \(bytesString(stagingModel.totalCandidateBytes)) (\(stagingModel.totalCandidateFiles) files)")
+                Text("Total: \(bytesString(stagingModel.totalCandidateBytes)) (\(fileCount(stagingModel.totalCandidateFiles)))")
                     .font(Typo.evidence)
                     .foregroundStyle(.secondary)
             }
@@ -348,7 +349,7 @@ struct BatchCandidateRow: View {
                                 Text("Reel: \(ins.reelName)")
                                     .font(Typo.evidence)
                             }
-                            Text("\(ins.files) files")
+                            Text(fileCount(ins.files))
                                 .font(Typo.evidence)
                             Text(bytesString(ins.bytes))
                                 .font(Typo.evidence)

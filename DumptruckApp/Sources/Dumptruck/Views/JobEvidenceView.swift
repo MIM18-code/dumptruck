@@ -96,7 +96,8 @@ struct JobEvidenceView: View {
             Spacer()
             VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
                          authorityWithdrawn: job.destinationAuthorityWithdrawn != nil,
-                             needsAttention: job.verifiedNeedsAttention)
+                             needsAttention: job.verifiedNeedsAttention,
+                         stopped: job.stoppedByOperator)
         }
     }
 
@@ -283,7 +284,7 @@ struct JobEvidenceView: View {
                         .font(Typo.safety)
                         .foregroundStyle(Semantics.warningText)
                 } else {
-                    Text("\(shown.count) files")
+                    Text(fileCount(shown.count))
                         .font(Typo.evidenceQuiet.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }

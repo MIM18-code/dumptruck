@@ -1155,6 +1155,7 @@ final class AppModel: ObservableObject {
             }
             return exact.name
         }
+        if let picked = LooseSourceStaging.displayName(for: path) { return picked }
         return URL(fileURLWithPath: path).lastPathComponent
     }
 
@@ -1981,8 +1982,7 @@ final class AppModel: ObservableObject {
             job.phase = .failed
             job.fullyVerified = false
             job.safeToWipe = false
-            job.error("operator stopped this queued transfer — "
-                      + Job.Verdict.failed.displayLine)
+            job.error("You stopped this copy before it started.")
             finalizeTerminal(job)
             return
         }
@@ -1990,8 +1990,7 @@ final class AppModel: ObservableObject {
         job.stopRequested = true
         job.fullyVerified = false
         job.safeToWipe = false
-        job.error("operator stopped this transfer — copy is incomplete; "
-                  + Job.Verdict.failed.displayLine)
+        job.error(Job.stoppedMessage)
         _ = persistJournal()
         guard let process = runningProcesses[job.id], process.isRunning else {
             job.phase = .failed
@@ -3638,16 +3637,34 @@ final class AppModel: ObservableObject {
             if let stagedSet { LooseSourceStaging.remove(stagedSet) }
         }
         releaseStaged(ordered, except: .source)
+        // Files picked from inside a staged card are a narrower choice of
+        // that card, not a second card: they take its place. Batching the
+        // two copied the whole card and then the picks again (beta tester,
+        // 2026-11-03).
+        let narrowed = stagedSet == nil ? [] : Self.sourcesNarrowed(
+            byPicked: Self.droppedFiles(rawPaths),
+            among: [sourcePath].compactMap { $0 } + batchStagingModel.candidates.map(\.path))
+        let narrowedCandidates = batchStagingModel.candidates.filter { narrowed.contains($0.path) }
+        func dropNarrowedCandidates() {
+            for candidate in narrowedCandidates {
+                batchStagingModel.removeCandidate(id: candidate.id, appModel: self)
+                releaseLooseSourceIfUnused(candidate.path)
+            }
+        }
         guard let route = Self.routeSourceDrop(
-            ordered, staged: sourcePath,
-            pendingBatch: batchStagingModel.candidates.map(\.path),
+            ordered,
+            staged: sourcePath.flatMap { narrowed.contains($0) ? nil : $0 },
+            pendingBatch: batchStagingModel.candidates.map(\.path).filter { !narrowed.contains($0) },
             stagedAlreadyRan: stagedSourceAlreadyRan) else {
             discardStagedSet()
             return nil
         }
         switch route {
         case .assign(let path):
-            if assign(path, as: .source) { return route }
+            if assign(path, as: .source) {
+                dropNarrowedCandidates()
+                return route
+            }
             discardStagedSet()
             return nil
         case .batch(let paths):
@@ -3662,11 +3679,43 @@ final class AppModel: ObservableObject {
                 }
             }
             lastSetupError = nil
+            dropNarrowedCandidates()
+            if let src = sourcePath, narrowed.contains(src) { clearSource() }
             // The cards collect in the rail's batch list; the window stays
             // where it is so the next drag works (see openBatchWindow).
             stageBatchSources(paths: paths, openWindow: false)
             return route
         }
+    }
+
+    /// The Batch Sources window's drop: batch candidates the dropped files
+    /// sit inside leave the list, so the picks replace them there too.
+    func removeCandidatesNarrowed(byDropped rawPaths: [String]) {
+        let narrowed = Self.sourcesNarrowed(byPicked: Self.droppedFiles(rawPaths),
+                                            among: batchStagingModel.candidates.map(\.path))
+        for candidate in batchStagingModel.candidates where narrowed.contains(candidate.path) {
+            batchStagingModel.removeCandidate(id: candidate.id, appModel: self)
+            releaseLooseSourceIfUnused(candidate.path)
+        }
+    }
+
+    /// The regular files in a drop, standardized, in drop order.
+    static func droppedFiles(_ rawPaths: [String]) -> [String] {
+        standardizedDropPaths(rawPaths).filter { path in
+            var st = stat()
+            return lstat(path, &st) == 0 && st.st_mode & S_IFMT == S_IFREG
+        }
+    }
+
+    /// Staged sources that every picked file sits inside. A staged set
+    /// counts by the drive folder it reads from, so picking again from the
+    /// same drive folder replaces the earlier pick too. Pure path work.
+    static func sourcesNarrowed(byPicked files: [String], among sources: [String]) -> Set<String> {
+        guard !files.isEmpty else { return [] }
+        return Set(sources.filter { source in
+            let location = LooseSourceStaging.sourceLocation(of: source)
+            return files.allSatisfy { pathIsAtOrInsideLexically($0, root: location) }
+        })
     }
 
     /// One drop, two kinds of item. Loose files (2026-09-15) become ONE
@@ -3965,8 +4014,7 @@ final class AppModel: ObservableObject {
                         job.fullyVerified = false
                         job.safeToWipe = false
                         if job.errorCount == 0 {
-                            job.error("operator stopped this transfer — copy is incomplete; "
-                                      + Job.Verdict.failed.displayLine)
+                            job.error(Job.stoppedMessage)
                         }
                     } else if proc.terminationStatus != 0 || stream.streamFailed {
                         // Exit code is authority: a nonzero exit can never
@@ -4335,6 +4383,23 @@ final class AppModel: ObservableObject {
     }
 
     func dismissAllDone() { allDoneJobIDs = [] }
+
+    /// Settled job cards the operator dismissed from the column, each keyed
+    /// to the alarm state it had at that moment. A failed transfer had no
+    /// way off the screen (beta tester, 2026-11-03). Nothing is deleted:
+    /// History keeps the record, and a card whose alarm state changes after
+    /// the dismissal (a later damage finding) comes back.
+    @Published private(set) var dismissedJobAlarms: [UUID: String] = [:]
+
+    func dismissJob(_ job: Job) {
+        guard !job.isRunning else { return }
+        dismissedJobAlarms[job.id] = JobDismissal.alarmKey(job)
+        dismissedJobAlarms = dismissedJobAlarms.filter { id, _ in jobs.contains { $0.id == id } }
+    }
+
+    func isDismissed(_ job: Job) -> Bool {
+        JobDismissal.isHidden(job, dismissedAs: dismissedJobAlarms[job.id])
+    }
 
     /// Called for each settled job. When the last running or queued job
     /// settles, everything that finished since the Mac was last idle becomes

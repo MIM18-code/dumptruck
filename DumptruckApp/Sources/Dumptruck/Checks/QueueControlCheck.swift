@@ -202,7 +202,7 @@ static func require(_ condition: @autoclosure () -> Bool, _ message: String) {
         require(stopTarget.verdict == .failed, "stopped queued job verdict was not .failed")
         require(!stopTarget.fullyVerified && !stopTarget.safeToWipe,
                 "stopped queued job retained verify/safe booleans")
-        require(stopTarget.messages.contains(where: { $0.text.contains("operator stopped this queued transfer") }),
+        require(stopTarget.messages.contains(where: { $0.text.contains("You stopped this copy before it started") }),
                 "stopped queued job did not record operator stop message")
         require(!model.queuedJobs.contains(where: { $0.id == stopTarget.id }),
                 "stopped queued job remained in active queuedJobs")

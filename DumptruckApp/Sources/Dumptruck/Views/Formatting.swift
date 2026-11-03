@@ -158,3 +158,6 @@ func pathIsAtOrInside(_ path: String, root: String) -> Bool {
         .resolvingSymlinksInPath
     return p == r || p.hasPrefix(r + "/")
 }
+
+/// "1 file", "12 files": a count of files that reads right at one.
+func fileCount(_ n: Int) -> String { n == 1 ? "1 file" : "\(n) files" }

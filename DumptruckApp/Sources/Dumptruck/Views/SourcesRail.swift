@@ -304,7 +304,10 @@ struct SourceCard: View {
                     Text("Reading card…").font(Typo.evidence).foregroundStyle(.secondary)
                 }
             } else if let ins = model.inspection {
-                Text("\(ins.formatName) · \(ins.files) files · \(bytesString(ins.bytes))")
+                // A pick's title already says what it is.
+                Text(LooseSourceStaging.displayName(for: path) == nil
+                     ? "\(ins.formatName) · \(fileCount(ins.files)) · \(bytesString(ins.bytes))"
+                     : "\(fileCount(ins.files)) · \(bytesString(ins.bytes))")
                     .font(Typo.evidence)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -424,18 +427,20 @@ struct SourceCard: View {
         case .safeToWipe: return Semantics.successText
         case .verifiedKeepCard: return Semantics.successText
         case .unverified: return Semantics.warningText
+        case .failed where echoJob?.stoppedByOperator == true: return Semantics.warningText
         case .failed: return Semantics.dangerText
         default: return .secondary
         }
     }
     private var echoSymbol: String {
         if withdrawnByEjection, echoJob?.hasCustodyFailure != true { return "eject.circle" }
-        if echoJob?.hasCustodyFailure == true || withdrawnJob != nil { return "xmark.octagon.fill" }
+        if echoJob?.hasCustodyFailure == true || withdrawnJob != nil { return "exclamationmark.octagon.fill" }
         if echoJob?.verifiedNeedsAttention == true { return "externaldrive.badge.exclamationmark" }
         switch echoJob?.verdict {
         case .safeToWipe: return "checkmark.seal.fill"
         case .verifiedKeepCard: return "checkmark.seal.fill"
-        case .failed: return "xmark.octagon.fill"
+        case .failed where echoJob?.stoppedByOperator == true: return "hand.raised.fill"
+        case .failed: return "exclamationmark.octagon.fill"
         default: return "exclamationmark.triangle.fill"
         }
     }

@@ -14,6 +14,11 @@ struct VerdictBadge: View {
     /// A verified copy with something the operator must look at
     /// (Job.verifiedNeedsAttention): amber, with its own words.
     var needsAttention = false
+    /// Job.stoppedByOperator: amber and its own words. The verdict stays
+    /// FAILED for every safety decision.
+    var stopped = false
+
+    static let stoppedLine = "STOPPED · KEEP CARD"
 
     private struct ChipStyle {
         let ink: AnyShapeStyle
@@ -29,6 +34,10 @@ struct VerdictBadge: View {
                              border: AnyShapeStyle(Semantics.warningText.opacity(0.45)))
         }
         switch verdict {
+        case .failed where stopped:
+            return ChipStyle(ink: AnyShapeStyle(Semantics.badgeInk),
+                             background: AnyShapeStyle(Semantics.warningText),
+                             border: AnyShapeStyle(Color.clear))
         case .failed:
             return ChipStyle(ink: AnyShapeStyle(Semantics.badgeInk),
                              background: AnyShapeStyle(Semantics.dangerText),
@@ -78,7 +87,8 @@ struct VerdictBadge: View {
                 } else {
                     chip(verdict.displayLine, "checkmark.seal.fill")
                 }
-            case .failed:           chip(verdict.displayLine, "xmark.octagon.fill")
+            case .failed where stopped: chip(Self.stoppedLine, "hand.raised.fill")
+            case .failed:           chip(verdict.displayLine, "exclamationmark.octagon.fill")
             case .running:          chip(phaseText, "arrow.triangle.2.circlepath")
             }
         }
@@ -104,7 +114,9 @@ struct VerdictBadge: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(verdict == .running ? phaseText
                             : (verdict == .verifiedKeepCard && needsAttention
-                               ? Self.attentionLine : verdict.displayLine))
+                               ? Self.attentionLine
+                               : (verdict == .failed && stopped ? Self.stoppedLine
+                                                                : verdict.displayLine)))
     }
 
     /// A short settle only when a verdict is EARNED. Alarms (failed,

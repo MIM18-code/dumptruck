@@ -257,6 +257,50 @@ enum LooseSourceStagingCheck {
             fatalError("the hold must say a transfer is running")
         }
         model.jobs = []
+
+        // 10. Files picked from inside the staged card replace the card
+        //     instead of batching beside it, which copied the whole card and
+        //     then the picks again (beta tester, 2026-11-03).
+        require(model.assign(drive + "/DCIM", as: .source), "the drive folder stages as a source")
+        guard case .assign(let narrowedSet)? = model.stageDroppedSources([pickA]) else {
+            fatalError("files picked inside the staged card must replace it")
+        }
+        require(model.sourcePath == narrowedSet && LooseSourceStaging.isSelectionSet(narrowedSet),
+                "the picks are the staged source now")
+        require(model.batchStagingModel.candidates.isEmpty, "no batch: the card is not copied twice")
+        require(LooseSourceStaging.displayName(for: narrowedSet) == "Files picked from A001",
+                "a pick is shown by where it came from, never by its staging folder: "
+                + "\(String(describing: LooseSourceStaging.displayName(for: narrowedSet)))")
+        require(model.endpointDisplayName(narrowedSet) == "Files picked from A001",
+                "the rails use the same name")
+        require(LooseSourceStaging.displayName(for: drive + "/DCIM") == nil,
+                "a real folder keeps its own name")
+        // Picking again from the same folder replaces the earlier pick.
+        guard case .assign(let repicked)? = model.stageDroppedSources(
+            [pickA, drive + "/DCIM/A001/unpicked.braw"]) else {
+            fatalError("a second pick from the same folder must replace the first")
+        }
+        require(model.sourcePath == repicked && !fm.fileExists(atPath: narrowedSet),
+                "the replaced pick is released")
+        // Files from somewhere else are a second source, as before.
+        guard case .batch(let beside)? = model.stageDroppedSources([pickB]) else {
+            fatalError("files outside the staged pick must batch beside it")
+        }
+        require(beside.count == 2 && beside[0] == repicked, "staged pick first, new pick second: \(beside)")
+        let besideSet = beside[1]
+        model.batchStagingModel.cancelStaging()
+        model.releaseLooseSourceIfUnused(besideSet)
+        model.clearSource()
+        require(!fm.fileExists(atPath: repicked) && !fm.fileExists(atPath: besideSet),
+                "cleared picks are released")
+        // The Batch Sources window: picks dropped there replace the card
+        // they came from, and leave other cards alone (Sol review S2).
+        model.stageBatchSources(paths: [drive + "/DCIM", elsewhere], openWindow: false)
+        model.removeCandidatesNarrowed(byDropped: [pickA])
+        require(model.batchStagingModel.candidates.map(\.path) == [elsewhere],
+                "the card the picks came from leaves the batch: "
+                + "\(model.batchStagingModel.candidates.map(\.path))")
+        model.batchStagingModel.cancelStaging()
         require(LooseSourceStaging.remove(picked), "a selection set removes like any set")
         require(fm.fileExists(atPath: pickA) && fm.fileExists(atPath: pickB),
                 "removing a selection set never touches the drive")

@@ -33,7 +33,11 @@ enum LooseSourceStaging {
         return base.appendingPathComponent("Dumptruck/loose-sources", isDirectory: true)
     }()
 
-    static let folderPrefix = "Loose "
+    /// New sets are named "Picked <timestamp>". "Loose" read as jargon to
+    /// a beta tester (2026-11-03); sets from older builds keep their name
+    /// and are still swept.
+    static let folderPrefix = "Picked "
+    static let legacyFolderPrefixes = ["Loose "]
 
     /// Inside a selection set. A set of clones is flat files, so a folder
     /// here marks a selection set; a dropped file can never fake one.
@@ -105,6 +109,27 @@ enum LooseSourceStaging {
               !name.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
         else { return nil }
         return name
+    }
+
+    /// What the rails call a staged set: "Files picked from A001", never the
+    /// staging folder's own name. nil for any path outside the staging root.
+    /// The lexical prefix test runs first, so a drive path (which may sit on
+    /// a wedged mount) is never stat'ed from a view body.
+    static func displayName(for path: String, root: URL = root) -> String? {
+        let r = root.path
+        guard path.hasPrefix(r + "/") || path.hasPrefix(root.standardizedFileURL.path + "/"),
+              isStagedSet(path, root: root) else { return nil }
+        guard let origin = suggestedLabel(for: path, root: root) else { return "Picked files" }
+        return "Files picked from \(origin)"
+    }
+
+    /// The path to show for a source: a pick shows the folder its files
+    /// came from (empty when that is unknown), never the staging folder.
+    static func sourceLocationForDisplay(_ path: String) -> String {
+        guard displayName(for: path) != nil else { return path }
+        let std = URL(fileURLWithPath: path).standardizedFileURL.path
+        if isSelectionSet(std) { return sourceLocation(of: std) }
+        return originFolders[std] ?? ""
     }
 
     /// Engine arguments that mark a staged set, after the source path.
@@ -262,7 +287,8 @@ enum LooseSourceStaging {
             return []
         }
         var removed: [String] = []
-        for name in names where name.hasPrefix(folderPrefix) {
+        let prefixes = [folderPrefix] + legacyFolderPrefixes
+        for name in names where prefixes.contains(where: { name.hasPrefix($0) }) {
             let path = root.appendingPathComponent(name).standardizedFileURL.path
             if keep.contains(path) { continue }
             guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),

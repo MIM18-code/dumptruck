@@ -64,6 +64,7 @@ struct FlowColumn: View {
             // news, never a new alarm.
             let shownLiveJobs = liveJobs.filter {
                 !(clearedLiveJobIDs.contains($0.id) && LiveJobClearing.isClearable($0))
+                    && !model.isDismissed($0)
             }
             let clearable = shownLiveJobs.filter(LiveJobClearing.isClearable)
             if model.sourcePath == nil && shownLiveJobs.isEmpty {
@@ -124,7 +125,7 @@ struct FlowColumn: View {
             }
             .buttonStyle(.link).hoverHighlight()
             .font(.caption)
-            .help("Hide finished SAFE and verified cards from this column. Failed cards stay. Nothing is deleted; every record stays in History.")
+            .help("Hide finished cards. Failed cards stay. Everything stays in History.")
             .accessibilityLabel("Clear finished cards from the column; records remain in History")
         }
     }
@@ -178,13 +179,15 @@ struct FlowColumn: View {
     /// Fast mode is a day-long trap if it's only visible in Settings (Kimi
     /// K3 review): an ambient strip while it is active.
     private var fastModeStrip: some View {
-        Label("Fast mode is on: copies are size-checked, not verified",
+        // The operator chose Fast mode; say so once, quietly. Each job's
+        // badge still says COPIED · NOT VERIFIED (Joshua, 2026-11-03: an
+        // orange strip on every screen read as a standing warning).
+        Label("Fast mode: copies are size-checked, not read back",
               systemImage: "hare.fill")
-            .font(Typo.safety)
+            .font(Typo.evidence)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 5)
-            .background(Semantics.warning.opacity(Semantics.chip))
-            .foregroundStyle(Semantics.warningText)
+            .foregroundStyle(.secondary)
             .overlay(alignment: .bottom) { Divider() }
     }
 }
@@ -273,18 +276,43 @@ enum ReceiptVisibility {
 /// Which live (this-session) job cards the column's Clear Finished may
 /// hide. Stricter than the receipt rule on purpose: a failure happening now
 /// keeps its full card (the facelift rule, and the arcade alarm row shows
-/// live failures unconditionally). Only a settled SAFE or VERIFIED · KEEP
-/// CARD job with no later damage finding qualifies. A SAFE whose copy
+/// live failures unconditionally). A settled verified job, a Fast-mode copy
+/// with no failed file, or a stop the operator chose qualifies, with no
+/// later damage finding. A SAFE whose copy
 /// changed after the verdict stays; one whose backup drive was merely
 /// ejected may go (Joshua, 2026-09-28).
 enum LiveJobClearing {
     static func isClearable(_ job: Job) -> Bool {
+        // A transfer the operator stopped is their own choice, not an alarm.
+        if !job.restoredFromJournal, !job.isRunning, job.stoppedByOperator { return true }
         guard !job.restoredFromJournal, !job.isRunning,
-              job.verdict == .safeToWipe || job.verdict == .verifiedKeepCard,
+              // A Fast-mode copy is the result the operator asked for; with
+              // Fast mode on it is every result, so it clears too.
+              job.verdict == .safeToWipe || job.verdict == .verifiedKeepCard
+                  || (job.verdict == .unverified && job.filesFailed == 0),
               !job.hasCustodyFailure,
               job.laterVerification?.isClean ?? true else { return false }
         return job.destinationAuthorityWithdrawn == nil
             || job.destinationAuthorityWithdrawnByEjection
+    }
+}
+
+/// The per-card Dismiss rule. Unlike Clear Finished it covers failures too:
+/// the operator chose to put this one card away. A running job never hides,
+/// and a dismissed card returns when its alarm state changes afterwards.
+enum JobDismissal {
+    /// Every damage finding by destination and date, plus any withdrawal:
+    /// a second destination's damage after the dismissal changes the key.
+    static func alarmKey(_ job: Job) -> String {
+        let damage = job.custodyFailures.keys.sorted().map { root in
+            "\(root)@\(job.custodyFailures[root]!.date.timeIntervalSince1970)"
+        }
+        return (damage + [job.destinationAuthorityWithdrawn ?? ""]).joined(separator: "|")
+    }
+
+    static func isHidden(_ job: Job, dismissedAs key: String?) -> Bool {
+        guard let key, !job.isRunning else { return false }
+        return alarmKey(job) == key
     }
 }
 
@@ -388,18 +416,47 @@ struct ReceiptStrip: View {
         }
     }
 
+    /// One receipt off the strip, by the same ID rule as Clear.
+    private func hide(_ job: Job) {
+        let current = Set(model.jobs.map { $0.id.uuidString })
+        var ids = ReceiptVisibility.decode(clearedIDsRaw).intersection(current)
+        ids.insert(job.id.uuidString)
+        clearedIDsRaw = ReceiptVisibility.encode(ids)
+        expandedIDs.remove(job.id)
+    }
+
     private func rows(_ shown: [Job]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(shown) { job in
-                ReceiptRow(job: job, expanded: expandedIDs.contains(job.id)) {
+                ReceiptRow(job: job, expanded: expandedIDs.contains(job.id), toggle: {
                     if expandedIDs.contains(job.id) {
                         expandedIDs.remove(job.id)
                     } else {
                         expandedIDs.insert(job.id)
                     }
-                }
+                }, close: { hide(job) })
             }
         }
+    }
+}
+
+/// The small X that closes a finished card or an earlier receipt. Quiet
+/// until hovered; never red, so it reads as a control, not a verdict.
+struct CloseCardButton: View {
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .imageScale(.small)
+                .frame(width: 18, height: 18)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(HoverHighlightButtonStyle())
+        .foregroundStyle(.secondary)
+        .help(help)
+        .accessibilityLabel("Close")
     }
 }
 
@@ -407,9 +464,11 @@ struct ReceiptRow: View {
     @ObservedObject var job: Job
     let expanded: Bool
     let toggle: () -> Void
+    let close: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+          HStack(spacing: 4) {
             Button(action: toggle) {
                 HStack(spacing: 10) {
                     Image(systemName: "chevron.right")
@@ -422,7 +481,7 @@ struct ReceiptRow: View {
                     Text(job.label)
                         .font(Typo.safety)
                         .lineLimit(1).truncationMode(.middle)
-                    Text("\(job.filesCopied + job.filesSkipped) files · \(bytesString(job.bytesTotal))")
+                    Text("\(fileCount(job.filesCopied + job.filesSkipped)) · \(bytesString(job.bytesTotal))")
                         .font(Typo.evidenceQuiet.monospacedDigit())
                         .foregroundStyle(.tertiary)
                     Spacer()
@@ -433,16 +492,19 @@ struct ReceiptRow: View {
                     }
                     VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
                              authorityWithdrawn: job.destinationAuthorityWithdrawn != nil,
-                             needsAttention: job.verifiedNeedsAttention)
+                             needsAttention: job.verifiedNeedsAttention,
+                         stopped: job.stoppedByOperator)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(HoverHighlightButtonStyle())
-            .accessibilityLabel("\(job.label), \(job.verdictLine)"
+            .accessibilityLabel("\(job.label), \(job.stoppedByOperator ? VerdictBadge.stoppedLine : job.verdictLine)"
                 + (job.laterVerification.map { ", \($0.line)" } ?? "")
                 + ", \(expanded ? "expanded" : "collapsed")")
             .accessibilityHint(expanded ? "Collapses this prior job"
                                         : "Expands this prior job's full card")
+            CloseCardButton(help: "Hide this from the list. It stays in History.", action: close)
+          }
             if expanded {
                 JobCard(job: job)
             }
@@ -505,6 +567,7 @@ struct BenchCard: View {
                 // for its label); saying it twice read as a stutter.
                 let sourceName = model.sourcePath.map(model.endpointDisplayName) ?? ""
                 let identity = sourceName == model.label || model.label.isEmpty
+                    || sourceName.hasSuffix(" " + model.label)
                     ? sourceName : "\(sourceName) · \(model.label)"
                 Text("\(identity) · ^[\(model.destinationPaths.count) destination](inflect: true)")
                     .font(.callout.monospaced())
@@ -577,7 +640,7 @@ struct BenchCard: View {
     private func proposalSummary(_ proposal: AppModel.ContinuationProposal) -> String {
         var parts: [String] = []
         if let ins = model.inspection {
-            parts.append("\(ins.files) files · \(bytesString(ins.bytes))")
+            parts.append("\(fileCount(ins.files)) · \(bytesString(ins.bytes))")
         }
         let names = proposal.anchors.map(model.endpointDisplayName)
             .joined(separator: " + ")
@@ -593,12 +656,12 @@ struct BenchCard: View {
                     if model.inspecting {
                         Text("Reading card…").font(.headline)
                     } else if let ins = model.inspection {
-                        Text("\(ins.formatName) — \(ins.files) files, \(bytesString(ins.bytes))")
+                        Text("\(ins.formatName) — \(fileCount(ins.files)), \(bytesString(ins.bytes))")
                             .font(.headline)
                     } else if let src = model.sourcePath {
                         Text(model.endpointDisplayName(src)).font(.headline)
                     }
-                    if let src = model.sourcePath {
+                    if let src = model.sourcePath.map(LooseSourceStaging.sourceLocationForDisplay), !src.isEmpty {
                         Text(src)
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
@@ -805,14 +868,16 @@ struct JobCard: View {
     private var cardRail: AnyShapeStyle {
         switch job.verdict {
         case .running:                     return AnyShapeStyle(Semantics.running)
+        case .failed where job.stoppedByOperator: return AnyShapeStyle(.quaternary)
         case .failed:                      return AnyShapeStyle(Semantics.danger)
-        case .unverified:                  return AnyShapeStyle(Semantics.warning)
+        case .unverified:                  return AnyShapeStyle(.quaternary)
         case .safeToWipe, .verifiedKeepCard: return AnyShapeStyle(.quaternary)
         }
     }
     private var cardRailWidth: CGFloat {
         switch job.verdict {
-        case .safeToWipe, .verifiedKeepCard: return 3
+        case .safeToWipe, .verifiedKeepCard, .unverified: return 3
+        case .failed where job.stoppedByOperator: return 3
         default:                             return 4
         }
     }
@@ -917,6 +982,9 @@ struct JobCard: View {
 
         Divider()
         Button("Copy Card Label") { FinderEvidenceActions.copyToPasteboard(job.label) }
+        if !job.restoredFromJournal {
+            Button("Dismiss Card") { model.dismissJob(job) }
+        }
     }
 
     private func copyToPasteboard(_ s: String) {
@@ -941,7 +1009,9 @@ private struct JobMessagesView: View {
     var body: some View {
         // Warnings alone stay one quiet grey line, because some still matter
         // (a report that failed, a skipped file). Errors always show, in red.
-        if !job.messages.isEmpty {
+        // A stopped job's one message is already on the card face; a red
+        // "1 error" under it read as a second problem.
+        if !job.messages.isEmpty, !(job.stoppedByOperator && job.messages.count == 1) {
             DisclosureGroup {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
@@ -959,7 +1029,7 @@ private struct JobMessagesView: View {
                         LazyVStack(alignment: .leading, spacing: 4) {
                             ForEach(job.messagePage(page)) { message in
                                 Label(String(message.text.prefix(4096)) + (message.text.count > 4096 ? "… [full text in export]" : ""),
-                                      systemImage: message.severity == .error ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                                      systemImage: message.severity == .error ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
                                     .font(Typo.evidenceQuiet)
                                     .foregroundStyle(message.severity == .error ? Semantics.dangerText : Semantics.warningText)
                                     .textSelection(.enabled)
@@ -1053,8 +1123,17 @@ struct JobHeaderBand: View {
                 Spacer()
                 VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
                              authorityWithdrawn: job.destinationAuthorityWithdrawn != nil,
-                             needsAttention: job.verifiedNeedsAttention)
+                             needsAttention: job.verifiedNeedsAttention,
+                         stopped: job.stoppedByOperator)
                     .layoutPriority(1)
+                // A real close button on every finished card (Joshua,
+                // 2026-11-03: the X's on a failed card looked clickable and
+                // weren't). Earlier receipts close from their own row.
+                if !job.isRunning, !job.restoredFromJournal {
+                    CloseCardButton(help: "Hide this card. It stays in History.") {
+                        model.dismissJob(job)
+                    }
+                }
             }
             if job.hasCustodyFailure {
                 Label("Custody check failed. Keep the card. " + job.custodyFailures.keys.sorted().joined(separator: ", "),
@@ -1268,14 +1347,14 @@ struct JobHeaderBand: View {
             .controlSize(.small)
             .disabled(job.stopRequested)
             .confirmationDialog(
-                "Stop \(job.label)? The copy will be incomplete and the source must not be wiped.",
+                "Stop copying \(job.label)?",
                 isPresented: $stopConfirmation,
                 titleVisibility: .visible
             ) {
-                Button("Stop Transfer", role: .destructive) {
+                Button("Stop", role: .destructive) {
                     model.stop(job: job)
                 }
-                Button("Continue Transfer", role: .cancel) {}
+                Button("Keep Copying", role: .cancel) {}
             }
         }
         // A quiet, entirely optional nudge: the games exist and now is the
@@ -1525,7 +1604,7 @@ struct JobHeaderBand: View {
             // should have to open a list to learn what happened.
             Text(reason)
                 .font(Typo.safetyBody)
-                .foregroundStyle(Semantics.dangerText)
+                .foregroundStyle(job.stoppedByOperator ? Semantics.warningText : Semantics.dangerText)
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
@@ -1570,6 +1649,8 @@ struct JobHeaderBand: View {
             ejectLabel: ejectableSourceLabel,
             reportPath: shownReportPath,
             canRetry: job.launchPlanSnapshot != nil,
+            // An earlier receipt closes from its own row's X.
+            dismiss: job.restoredFromJournal ? nil : { [job, model] in model.dismissJob(job) },
             eject: { [job, model] in
                 // Re-validate at CLICK time: a continuation may have started
                 // since this row rendered (Ox review, F1 — the notification
@@ -1734,6 +1815,7 @@ struct DestinationLane: View {
         if authorityWithdrawnHere { return .failed }
         if progress.filesFailed > 0 { return .failed }
         if !job.isRunning {
+            if job.stoppedByOperator { return .stopped }
             if job.fullyVerified { return .complete }
             // Finished clean but not read back (Fast mode): keep the card,
             // nothing failed. A failed file was caught above.
@@ -1757,14 +1839,16 @@ struct DestinationLane: View {
             // actually emitted for this lane.
             parts = []
             if progress.filesVerified > 0 || progress.bytesVerified > 0 {
-                parts.append("verified \(bytesString(progress.bytesVerified)) · \(progress.filesVerified) files")
+                parts.append("verified \(bytesString(progress.bytesVerified)) · \(fileCount(progress.filesVerified))")
             }
             if progress.filesTrusted > 0 {
                 parts.append("\(progress.filesTrusted) trusted, not re-read")
             }
-            if progress.sizeOnly > 0 { parts.append("\(progress.sizeOnly) size checked only — not verified") }
+            if progress.sizeOnly > 0 { parts.append("\(progress.sizeOnly) copied, size-checked") }
             if progress.filesFailed > 0 { parts.append("\(progress.filesFailed) FAILED") }
-            if parts.isEmpty {
+            if job.stopRequested, !job.isRunning {
+                parts.append("stopped")
+            } else if parts.isEmpty {
                 parts.append(job.isRunning ? "waiting…" : "no results recorded")
             }
             // Capacity outranks relative-speed commentary (agy audit 9).
@@ -1892,8 +1976,11 @@ struct DestinationLane: View {
 
     private var terminusSymbol: String {
         switch state {
-        case .failed: return "xmark.octagon.fill"
-        case .unverified: return "exclamationmark.triangle.fill"
+        // A drive glyph with a badge, not a bare X: a red X at the end of
+        // each lane read as a close button (beta tester, 2026-11-03).
+        case .failed: return "externaldrive.fill.badge.xmark"
+        case .stopped: return "externaldrive.fill.badge.minus"
+        case .unverified: return "externaldrive.fill"
         case .complete: return "checkmark.circle.fill"
         case .detached: return "eject.circle.fill"
         default: return "externaldrive.fill"
@@ -1903,7 +1990,8 @@ struct DestinationLane: View {
         switch state {
         case .failed: return Semantics.dangerText
         case .complete: return Semantics.successText
-        case .sealing, .detached, .unverified: return Semantics.warningText
+        case .unverified, .stopped: return .secondary
+        case .sealing, .detached: return Semantics.warningText
         default: return Semantics.destinationText
         }
     }
@@ -1912,7 +2000,6 @@ struct DestinationLane: View {
         if ejectedHere { return Semantics.warningText }
         if progress.filesFailed > 0 { return Semantics.dangerText }
         if lowSpaceWarning != nil { return Semantics.warningText }
-        if progress.sizeOnly > 0 { return Semantics.warningText }
         // "slowest destination" is relative trivia, not a defect — it never
         // takes the warning color; LOW SPACE owns amber alone (Kimi F16).
         return .secondary
@@ -1921,7 +2008,7 @@ struct DestinationLane: View {
     /// A lane caption naming a FAILED file or size-only evidence is a defect
     /// report, not supporting prose — it takes the heavier safety tier.
     private var laneCaptionIsDefect: Bool {
-        progress.filesFailed > 0 || progress.sizeOnly > 0 || lowSpaceWarning != nil
+        progress.filesFailed > 0 || lowSpaceWarning != nil
     }
 
     private var lowSpaceWarning: String? {
@@ -1942,7 +2029,8 @@ struct LaneTrack: View {
     /// `detached`: the lane's drive was ejected after the verdict. Not a
     /// failure; the copy is simply no longer watched. `unverified`: copied
     /// clean, size-checked only.
-    enum LaneState { case planned, running, sealing, complete, unverified, failed, detached }
+    /// `stopped`: the operator pressed Stop; the copy is incomplete.
+    enum LaneState { case planned, running, sealing, complete, unverified, failed, detached, stopped }
     let fraction: Double
     let state: LaneState
 
@@ -1950,7 +2038,11 @@ struct LaneTrack: View {
         switch state {
         case .planned: return .clear
         case .running: return Semantics.running
-        case .sealing, .detached, .unverified: return Semantics.warning
+        // A Fast-mode copy or a stop the operator chose: the badge says so
+        // once; the bars stay quiet (the red-orange read as an alarm,
+        // Joshua, 2026-11-03).
+        case .unverified, .stopped: return Color.secondary.opacity(0.55)
+        case .sealing, .detached: return Semantics.warning
         case .complete: return Semantics.success
         case .failed: return Semantics.danger
         }
@@ -2039,6 +2131,7 @@ private struct ReceiptActionRow: View, Equatable {
     let ejectLabel: String?
     let reportPath: String?
     let canRetry: Bool
+    let dismiss: (() -> Void)?
     let eject: () -> Void
     let showEvidence: () -> Void
     let quickLook: (String) -> Void
@@ -2056,6 +2149,7 @@ private struct ReceiptActionRow: View, Equatable {
         // overflow the card or truncate labels again.
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
+                dismissButton
                 Spacer()
                 ejectSourceButton
                 evidenceButton
@@ -2069,11 +2163,26 @@ private struct ReceiptActionRow: View, Equatable {
                     evidenceButton
                 }
                 HStack(spacing: 8) {
+                    dismissButton
                     Spacer()
                     openReportMenu
                     stageRetryButton
                 }
             }
+        }
+    }
+
+    /// Takes this one card off the column. Left-aligned and away from the
+    /// evidence actions so it is never hit by mistake.
+    @ViewBuilder
+    private var dismissButton: some View {
+        if let dismiss {
+            Button(action: dismiss) {
+                Label("Dismiss", systemImage: "eye.slash")
+            }
+            .controlSize(.small)
+            .fixedSize()
+            .help("Hide this card. It stays in History.")
         }
     }
 
