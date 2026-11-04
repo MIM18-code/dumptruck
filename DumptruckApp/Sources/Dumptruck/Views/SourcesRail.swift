@@ -215,7 +215,7 @@ private struct BatchRailRow: View {
             Image(systemName: candidate.path.hasPrefix("/Volumes/") ? "sdcard.fill" : "folder.fill")
                 .imageScale(.small)
                 .foregroundStyle(Semantics.sourceText)
-            Text(candidate.volumeName)
+            Text(candidate.displayName)
                 .font(.callout)
                 .lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 4)
@@ -228,7 +228,7 @@ private struct BatchRailRow: View {
             .buttonStyle(HoverHighlightButtonStyle())
             .foregroundStyle(.tertiary)
             .help("Remove from the batch")
-            .accessibilityLabel("Remove \(candidate.volumeName) from the batch")
+            .accessibilityLabel("Remove \(candidate.displayName) from the batch")
         }
     }
 

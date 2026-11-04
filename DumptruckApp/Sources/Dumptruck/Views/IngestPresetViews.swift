@@ -15,9 +15,7 @@ struct SaveIngestPresetSheet: View {
         let d = UserDefaults.standard
         let template = d.string(forKey: Pref.folderTemplate) ?? ""
         let project = d.string(forKey: Pref.projectName) ?? ""
-        let volumeName = model.sourcePath.map {
-            URL(fileURLWithPath: $0).lastPathComponent
-        } ?? "CARD_VOLUME"
+        let volumeName = model.sourcePath.map(LooseSourceStaging.templateVolumeName) ?? "CARD_VOLUME"
         let context = TemplateContext(
             project: project,
             volumeName: volumeName,

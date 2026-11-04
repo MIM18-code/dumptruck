@@ -1222,7 +1222,7 @@ final class AppModel: ObservableObject {
         let d = UserDefaults.standard
         let context = TemplateContext(
             project: d.string(forKey: Pref.projectName) ?? "",
-            volumeName: (sourcePath as NSString?)?.lastPathComponent ?? "",
+            volumeName: sourcePath.map(LooseSourceStaging.templateVolumeName) ?? "",
             cardLabel: label,
             date: Date(),
             cameraFormat: (inspection?.formatName == "?" ? "" : (inspection?.formatName ?? "")).replacingOccurrences(of: "/", with: "-"),
@@ -2410,7 +2410,7 @@ final class AppModel: ObservableObject {
             if stagedRetryPlan == nil {
                 let context = TemplateContext(
                     project: d.string(forKey: Pref.projectName) ?? "",
-                    volumeName: URL(fileURLWithPath: src).lastPathComponent,
+                    volumeName: LooseSourceStaging.templateVolumeName(for: src),
                     cardLabel: label,
                     date: Date(),
                     cameraFormat: (inspection?.formatName == "?" ? "" : (inspection?.formatName ?? "")).replacingOccurrences(of: "/", with: "-"),
@@ -3270,7 +3270,7 @@ final class AppModel: ObservableObject {
         let d = UserDefaults.standard
         let template = d.string(forKey: Pref.folderTemplate) ?? ""
         let project = d.string(forKey: Pref.projectName) ?? ""
-        let volName = src.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+        let volName = src.map(LooseSourceStaging.templateVolumeName) ?? ""
         // A staged historical retry owns the rendered organization path. Do
         // not let a later Settings edit silently redirect it before Start.
         let sub: String
@@ -3316,7 +3316,7 @@ final class AppModel: ObservableObject {
         // path across UI, journal, and engine.
         let frozenContext = context ?? TemplateContext(
             project: d.string(forKey: Pref.projectName) ?? "",
-            volumeName: URL(fileURLWithPath: src).lastPathComponent,
+            volumeName: LooseSourceStaging.templateVolumeName(for: src),
             cardLabel: cardLabel,
             date: Date(),
             cameraFormat: (targetInspection?.formatName == "?" ? "" : (targetInspection?.formatName ?? "")).replacingOccurrences(of: "/", with: "-"),

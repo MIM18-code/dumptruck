@@ -132,6 +132,21 @@ enum LooseSourceStaging {
         return originFolders[std] ?? ""
     }
 
+    /// The {Volume} folder-template value for a source. A pick takes the
+    /// drive its files are on, or for files on this Mac the folder they came
+    /// from; never the staging folder's name ("Picked 2026-…"). Any other
+    /// source keeps its own last path component.
+    static func templateVolumeName(for path: String) -> String {
+        let own = (path as NSString).lastPathComponent
+        guard displayName(for: path) != nil else { return own }
+        let origin = sourceLocationForDisplay(path)
+        if origin.hasPrefix("/Volumes/"),
+           let drive = origin.dropFirst("/Volumes/".count).split(separator: "/").first {
+            return String(drive)
+        }
+        return suggestedLabel(for: path) ?? "Picked files"
+    }
+
     /// Engine arguments that mark a staged set, after the source path.
     static func engineFlags(for path: String, root: URL = root) -> [String] {
         isSelectionSet(path, root: root) ? ["--selection"] : []

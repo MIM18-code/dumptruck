@@ -330,7 +330,7 @@ struct BatchCandidateRow: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
-                        Text(candidate.volumeName)
+                        Text(candidate.displayName)
                             .font(.callout.weight(.semibold))
                         Text(candidate.path)
                             .font(Typo.evidence.monospaced())

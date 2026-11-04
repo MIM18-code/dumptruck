@@ -301,6 +301,35 @@ enum LooseSourceStagingCheck {
                 "the card the picks came from leaves the batch: "
                 + "\(model.batchStagingModel.candidates.map(\.path))")
         model.batchStagingModel.cancelStaging()
+        // 11. {VolumeName} for a pick is the drive its files are on, or the
+        //     folder they came from, never the staging folder (tester
+        //     follow-up, 2026-11-03).
+        require(LooseSourceStaging.templateVolumeName(for: drive + "/DCIM") == "DCIM",
+                "a folder source keeps its own name")
+        require(LooseSourceStaging.templateVolumeName(for: picked) == "DCIM",
+                "picks off a folder that is not a mounted drive take that folder's name")
+        let onCard = stagingRoot.appendingPathComponent("Picked 2099-01-01 00.00.00").path
+        try fm.createDirectory(atPath: onCard + "/" + LooseSourceStaging.selectionFolder,
+                               withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: ["version": 1, "root": "/Volumes/CARD_X/DCIM/A001",
+                                                    "files": ["clip.mov"]])
+            .write(to: URL(fileURLWithPath: onCard + "/" + LooseSourceStaging.selectionFolder
+                           + "/" + LooseSourceStaging.selectionManifest))
+        require(LooseSourceStaging.templateVolumeName(for: onCard) == "CARD_X",
+                "picks off a card take the card's name: \(LooseSourceStaging.templateVolumeName(for: onCard))")
+        let defaults = UserDefaults.standard
+        let savedTemplate = defaults.object(forKey: Pref.folderTemplate)
+        defaults.set("{VolumeName}", forKey: Pref.folderTemplate)
+        switch model.buildPlan(src: onCard, rawRoots: [dest], cardLabel: "PICKED") {
+        case .success(let built):
+            require(built.dests.allSatisfy { $0.contains("/CARD_X") && !$0.contains("Picked ") },
+                    "the planned folder is named for the card: \(built.dests)")
+        case .failure(let err):
+            fatalError("buildPlan with {VolumeName} failed: \(err.message)")
+        }
+        if let savedTemplate { defaults.set(savedTemplate, forKey: Pref.folderTemplate) }
+        else { defaults.removeObject(forKey: Pref.folderTemplate) }
+        require(LooseSourceStaging.remove(onCard), "the test set removes")
         require(LooseSourceStaging.remove(picked), "a selection set removes like any set")
         require(fm.fileExists(atPath: pickA) && fm.fileExists(atPath: pickB),
                 "removing a selection set never touches the drive")

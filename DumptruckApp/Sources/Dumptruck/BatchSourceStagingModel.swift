@@ -21,6 +21,8 @@ final class BatchSourceCandidate: ObservableObject, Identifiable {
     let originalPath: String
     let path: String
     let volumeName: String
+    /// What the batch list calls this source: a pick by where it came from.
+    var displayName: String { LooseSourceStaging.displayName(for: path) ?? volumeName }
     let assignmentID: UUID
 
     @Published var status: BatchCandidateStatus = .pending
@@ -54,7 +56,7 @@ final class BatchSourceCandidate: ObservableObject, Identifiable {
         self.id = UUID()
         self.originalPath = originalPath ?? path
         self.path = path
-        self.volumeName = URL(fileURLWithPath: path).lastPathComponent
+        self.volumeName = LooseSourceStaging.templateVolumeName(for: path)
         self.assignmentID = assignmentID
         self.customLabel = ""
     }
@@ -284,7 +286,7 @@ final class BatchSourceStagingModel: ObservableObject {
             }
             named.append(candidate)
             entries.append(BatchLabelAllocator.Entry(
-                source: candidate.path, displayName: candidate.volumeName,
+                source: candidate.path, displayName: candidate.displayName,
                 label: label, fixed: !automatic || inspection.known))
         }
 
@@ -469,7 +471,7 @@ final class BatchSourceStagingModel: ObservableObject {
         let laneBase: BatchSourceStagingCore.LaneBase = { root, label, inspection, sourcePath in
             Self.laneBase(
                 root: root, label: label,
-                volumeName: URL(fileURLWithPath: sourcePath).lastPathComponent,
+                volumeName: LooseSourceStaging.templateVolumeName(for: sourcePath),
                 cameraFormat: inspection.metadata.customProperties["format_name"] ?? "",
                 reel: inspection.metadata.customProperties["reel_name"] ?? "",
                 mirroredFolder: mirrored, exactRoots: exactRoots,

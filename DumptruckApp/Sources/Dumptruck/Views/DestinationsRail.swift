@@ -258,7 +258,7 @@ struct DestinationCard: View {
         let d = UserDefaults.standard
         let template = d.string(forKey: Pref.folderTemplate) ?? ""
         let project = d.string(forKey: Pref.projectName) ?? ""
-        let volName = model.sourcePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+        let volName = model.sourcePath.map(LooseSourceStaging.templateVolumeName) ?? ""
         let context = TemplateContext(
             project: project,
             volumeName: volName,

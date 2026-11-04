@@ -46,9 +46,7 @@ extension AppModel {
             return error
         }
         let settings = currentIngestPresetSettings
-        let volumeName = sourcePath.map {
-            URL(fileURLWithPath: $0).lastPathComponent
-        } ?? "CARD_VOLUME"
+        let volumeName = sourcePath.map(LooseSourceStaging.templateVolumeName) ?? "CARD_VOLUME"
         let context = TemplateContext(
             project: settings.projectName,
             volumeName: volumeName,
@@ -93,9 +91,7 @@ extension AppModel {
             return message
         }
         let settings = preset.settings
-        let volumeName = sourcePath.map {
-            URL(fileURLWithPath: $0).lastPathComponent
-        } ?? "CARD_VOLUME"
+        let volumeName = sourcePath.map(LooseSourceStaging.templateVolumeName) ?? "CARD_VOLUME"
         let context = TemplateContext(
             project: settings.projectName,
             volumeName: volumeName,
