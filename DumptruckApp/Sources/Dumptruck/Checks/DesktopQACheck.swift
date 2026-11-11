@@ -586,6 +586,21 @@ enum DesktopQACheck {
                 "only the renamed cards carry a note")
         require(sameNames.generalError == nil && sameNames.canQueueBatch, "nothing blocks the batch")
 
+        // A job already writing <dest>/NO NAME holds that folder: the batch
+        // numbers past it instead of sending a second writer the engine
+        // would refuse (Sol review, 2026-11-10).
+        let writing = Job(label: "NO NAME", sourcePath: root.appendingPathComponent("BENCH").path,
+                          destinations: [nameDest], sourceAssignmentID: UUID())
+        writing.phase = .queued
+        model.jobs.insert(writing, at: 0)
+        sameNames.revalidateAll(appModel: model)
+        require(a7s.map(\.effectiveLabel) == ["NO NAME_2", "NO NAME_3", "NO NAME_4"],
+                "a folder an active job writes is taken: \(a7s.map(\.effectiveLabel))")
+        model.jobs.removeAll { $0.id == writing.id }
+        sameNames.revalidateAll(appModel: model)
+        require(a7s.map(\.effectiveLabel) == ["NO NAME", "NO NAME_2", "NO NAME_3"],
+                "the names come back when the job is gone: \(a7s.map(\.effectiveLabel))")
+
         // The operator types one name on two cards. Both used to be
         // refused; owner's rule, 2026-11-09: the earlier in drag order keeps
         // it, the later copies as "CAM_B_2" with a note, and the field keeps

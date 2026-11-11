@@ -336,6 +336,11 @@ final class BatchSourceStagingModel: ObservableObject {
         // Stale until this pass gives the card a name again.
         candidates.forEach { $0.assignNumberedLabel(nil) }
         let registry = cardRegistry()
+        // Folders a queued or running job is already writing. The engine
+        // refuses a second writer, so they are taken, the same rule
+        // single-card Start applies (AppModel.planUnderFreeName).
+        let busy = Set(appModel.jobs.filter(\.isRunning)
+            .flatMap(appModel.verdictLaneRoots).map(BatchCardNaming.labelKey))
         var allocator = BatchLabelAllocator(entries: entries)
         while let request = allocator.nextRequest() {
             let candidate = named[request.index]
@@ -365,8 +370,9 @@ final class BatchSourceStagingModel: ObservableObject {
                 // The engine's rule, the one single-card Start uses: a
                 // folder is taken only when it holds files another card
                 // on record wrote (or, unclaimed, carries its name).
-                let foreign = CardFolderClaims.isTaken(
-                    lane: lane, label: request.label, datasetID: datasetID, registry: registry)
+                let foreign = busy.contains(BatchCardNaming.labelKey(lane))
+                    || CardFolderClaims.isTaken(
+                        lane: lane, label: request.label, datasetID: datasetID, registry: registry)
                 probes.append(BatchLabelAllocator.LaneProbe(path: lane, foreign: foreign))
             }
             allocator.answer(rootInvalid
