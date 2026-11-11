@@ -19,7 +19,12 @@ final class MockBatchSourceFileSystem: BatchSourceFileSystem, @unchecked Sendabl
     }
 
     var entries: [String: Entry] = [:]
+    /// Lanes that exist and hold files.
     var existingLanes: Set<String> = []
+    /// The engine's card record as the core sees it. Never the real one.
+    var registry: [CardFolderClaims.Record] = []
+
+    func cardRegistry() -> [CardFolderClaims.Record] { registry }
 
     func normalizePath(_ path: String) throws -> String {
         return StandardPurePathNormalizer.normalize(path)
@@ -635,11 +640,19 @@ static func testExistingDestinationLaneConflictRejection() async {
     // Yesterday's "CardA" folder is already on the drive and this is a
     // different card (unknown to the registry). It must not write there;
     // it is numbered past every taken folder instead of refusing the batch.
+    // Changed for the engine's rule (owner's rule, 2026-11-09): a folder is
+    // taken only when a card on record wrote it, so the two folders in the
+    // way now belong to recorded cards. Files nobody on record claims are
+    // a resume, checked in testUnclaimedFolderKeepsItsName.
     let fs = MockBatchSourceFileSystem()
     fs.registerDirectory("/Volumes/CardA", devId: 1, fileId: 1001)
     fs.registerDirectory("/Volumes/CardB", devId: 2, fileId: 1002)
     fs.registerExistingLane("/Volumes/Backup/CardA")
     fs.registerExistingLane("/Volumes/Backup/CardA_2")
+    fs.registry = [
+        CardFolderClaims.Record(id: "yesterday-1", label: "CardA", destinations: ["/Volumes/Backup/CardA"]),
+        CardFolderClaims.Record(id: "yesterday-2", label: "CardA_2", destinations: ["/Volumes/Backup/CardA_2"]),
+    ]
     let inspector = MockBatchSourceInspector()
     let core = BatchSourceStagingCore(fileSystem: fs, inspector: inspector)
 
@@ -660,14 +673,47 @@ static func testExistingDestinationLaneConflictRejection() async {
     }
 }
 
+@MainActor
+static func testUnclaimedFolderKeepsItsName() async {
+    // The engine's rule (owner's rule, 2026-11-09): a folder of files that
+    // no card on record wrote, under a name no other recorded card carries,
+    // is a stopped first copy and resumes in place. The card keeps its name.
+    // The same folder written by a recorded card is taken.
+    let fs = MockBatchSourceFileSystem()
+    fs.registerDirectory("/Volumes/C001", devId: 1, fileId: 1501)
+    fs.registerExistingLane("/Volumes/Backup/C001")
+    let core = BatchSourceStagingCore(fileSystem: fs, inspector: MockBatchSourceInspector())
+    do {
+        var staged = try await core.stageBatch(
+            candidateSourcePaths: ["/Volumes/C001"], destinationRoots: ["/Volumes/Backup"])
+        assertEqual(staged.map(\.label), ["C001"], "Files no card on record claims leave the name free")
+        assertEqual(staged[0].renamedBecause, nil, "No rename for a resume")
+
+        fs.registry = [CardFolderClaims.Record(id: "other", label: "ZZZ", destinations: ["/Volumes/Backup/C001"])]
+        staged = try await core.stageBatch(
+            candidateSourcePaths: ["/Volumes/C001"], destinationRoots: ["/Volumes/Backup"])
+        assertEqual(staged.map(\.label), ["C001_2"], "A folder another recorded card wrote is taken")
+
+        // Unclaimed, but another recorded card carries the name: taken.
+        fs.registry = [CardFolderClaims.Record(id: "other", label: "c001", destinations: [])]
+        staged = try await core.stageBatch(
+            candidateSourcePaths: ["/Volumes/C001"], destinationRoots: ["/Volumes/Backup"])
+        assertEqual(staged.map(\.label), ["C001_2"], "An unclaimed folder under another recorded card's name is taken")
+    } catch {
+        TestRecorder.shared.recordFail(message: "Unexpected error \(error)", line: #line)
+    }
+}
+
 /// A card the engine recognized, with the card folders it wrote before.
-private static func knownCard(_ label: String, previous: [String]) -> BatchInspectionResult {
+private static func knownCard(_ label: String, previous: [String],
+                              id: String? = nil) -> BatchInspectionResult {
     BatchInspectionResult(
         protocolVersion: 3,
         metadata: CardInspectionMetadata(
             label: label, totalBytes: 100, fileCount: 1,
             customProperties: ["known": "true"],
-            previousDestinations: previous))
+            previousDestinations: previous,
+            datasetID: id))
 }
 
 @MainActor
@@ -682,9 +728,13 @@ static func testKnownCardContinuesIntoItsOwnLane() async {
     let inspector = MockBatchSourceInspector()
     inspector.inspectionMap["/Volumes/NO NAME"] = BatchInspectionResult(
         protocolVersion: 3, metadata: CardInspectionMetadata(label: "NO NAME"))
-    // The registry records realpath() spellings and folds case.
+    // The registry records realpath() spellings and folds case. The core
+    // now asks the card record who wrote the folder (CardFolderClaims), so
+    // the record carries this card's id and folder.
     inspector.inspectionMap["/Volumes/NO NAME 1"] = knownCard(
-        "NO NAME", previous: ["/Volumes/BACKUP/no name"])
+        "NO NAME", previous: ["/Volumes/BACKUP/no name"], id: "known-no-name")
+    fs.registry = [CardFolderClaims.Record(
+        id: "known-no-name", label: "NO NAME", destinations: ["/Volumes/BACKUP/no name"])]
     let core = BatchSourceStagingCore(fileSystem: fs, inspector: inspector)
 
     do {
@@ -704,16 +754,22 @@ static func testKnownCardContinuesIntoItsOwnLane() async {
 }
 
 @MainActor
-static func testKnownCardBlockedByAnotherCardsLaneIsRefusedAlone() async {
-    // A known card's name is its continuation key, so it is not renamed
-    // behind the operator's back. When its folder on this drive was written
-    // by a different card, only that card is refused, inspection kept.
+static func testKnownCardBlockedByAnotherCardsLaneIsNumbered() async {
+    // When a known card's folder on this drive was written by a different
+    // card, the known card never writes into it. It used to be refused to
+    // keep its name; owner's rule, 2026-11-09: it copies under the next
+    // free name instead, and the other card is unaffected.
     let fs = MockBatchSourceFileSystem()
     fs.registerDirectory("/Volumes/A001", devId: 1, fileId: 1301)
     fs.registerDirectory("/Volumes/B001", devId: 2, fileId: 1302)
     fs.registerExistingLane("/Volumes/Backup/A001")
+    fs.registry = [
+        CardFolderClaims.Record(id: "other-a001", label: "A001", destinations: ["/Volumes/Backup/A001"]),
+        CardFolderClaims.Record(id: "known-a001", label: "A001", destinations: ["/Volumes/Other/A001"]),
+    ]
     let inspector = MockBatchSourceInspector()
-    inspector.inspectionMap["/Volumes/A001"] = knownCard("A001", previous: ["/Volumes/Other/A001"])
+    inspector.inspectionMap["/Volumes/A001"] = knownCard(
+        "A001", previous: ["/Volumes/Other/A001"], id: "known-a001")
     let core = BatchSourceStagingCore(fileSystem: fs, inspector: inspector)
 
     do {
@@ -721,11 +777,12 @@ static func testKnownCardBlockedByAnotherCardsLaneIsRefusedAlone() async {
             candidateSourcePaths: ["/Volumes/A001", "/Volumes/B001"],
             destinationRoots: ["/Volumes/Backup"])
         assertEqual(staged.count, 2, "Both cards come back inspected")
-        assertEqual(staged[0].refusal,
-                    BatchLabelAllocator.existingFolderRefusal(label: "A001", lanePath: "/Volumes/Backup/A001"),
-                    "The known card is refused with the fix in the message")
-        assertTrue(staged[0].destinationLanes.isEmpty, "A refused card has no lanes")
-        assertEqual(staged[0].metadata.fileCount, 1, "A refused card keeps its inspection")
+        assertEqual(staged[0].refusal, nil, "The known card is not refused")
+        assertEqual(staged[0].label, "A001_2", "The known card is numbered past the other card's folder")
+        assertEqual(staged[0].destinationLanes.map(\.lanePath), ["/Volumes/Backup/A001_2"],
+                    "It never writes into the other card's folder")
+        assertEqual(staged[0].renamedBecause, .folderTaken(lanePath: "/Volumes/Backup/A001"),
+                    "The rename names the folder that was in the way")
         assertEqual(staged[1].refusal, nil, "The other card is unaffected")
         assertEqual(staged[1].label, "B001", "The other card keeps its name")
     } catch {
@@ -734,7 +791,10 @@ static func testKnownCardBlockedByAnotherCardsLaneIsRefusedAlone() async {
 }
 
 @MainActor
-static func testTwoKnownCardsWithOneNameAreBothRefused() async {
+static func testTwoKnownCardsWithOneNameAreNumbered() async {
+    // Both used to be refused. Owner's rule, 2026-11-09: the earlier one in
+    // drag order keeps the name, the later is numbered, and the new card
+    // steps around both. Still no two cards share a lane.
     let fs = MockBatchSourceFileSystem()
     fs.registerDirectory("/Volumes/Untitled", devId: 1, fileId: 1401)
     fs.registerDirectory("/Volumes/Untitled 1", devId: 2, fileId: 1402)
@@ -750,14 +810,12 @@ static func testTwoKnownCardsWithOneNameAreBothRefused() async {
         let staged = try await core.stageBatch(
             candidateSourcePaths: ["/Volumes/Untitled", "/Volumes/Untitled 1", "/Volumes/Untitled 2"],
             destinationRoots: ["/Volumes/Backup"])
-        assertEqual(staged[0].refusal,
-                    BatchLabelAllocator.sameNameRefusal(label: "Untitled", other: "Untitled 1"),
-                    "The first known card names the other")
-        assertEqual(staged[1].refusal,
-                    BatchLabelAllocator.sameNameRefusal(label: "Untitled", other: "Untitled"),
-                    "The second known card names the first")
-        assertEqual(staged[2].label, "Untitled_2", "A new card is numbered around both")
-        assertEqual(staged[2].refusal, nil, "The new card is Ready")
+        assertTrue(staged.allSatisfy { $0.refusal == nil }, "No card is refused")
+        assertEqual(staged.map(\.label), ["Untitled", "Untitled_2", "Untitled_3"],
+                    "The first known card keeps the name, the second is numbered, the new card goes after")
+        assertEqual(staged[1].renamedBecause, .sameNameInBatch, "The second known card says why")
+        assertEqual(Set(staged.flatMap { $0.destinationLanes.map(\.lanePath) }).count, 3,
+                    "Three cards, three lanes")
     } catch {
         TestRecorder.shared.recordFail(message: "Unexpected error \(error)", line: #line)
     }
@@ -793,21 +851,40 @@ static func testLabelAllocatorRules() async {
     assertEqual(natural.map(label), ["NO NAME", "NO NAME_3", "NO NAME_2"],
                 "Numbering skips another card's own name")
 
-    // Two typed duplicates refuse both, with the other card named; an
-    // automatic card with the same suggestion steps around them.
+    // Two typed duplicates used to refuse both. Owner's rule, 2026-11-09:
+    // the earlier keeps the name, the later is numbered from its own
+    // spelling, and an automatic card with the same suggestion steps
+    // around both (case folds: "cam_b_2" and "CAM_B_2" are one folder).
     let typedDup = run([typed("a", "CAM_B"), auto("b", "CAM_B"), typed("c", "cam_b")])
-    assertEqual(typedDup[0], .refused(A.sameNameRefusal(label: "CAM_B", other: "c")), "First typed duplicate refused")
-    assertEqual(typedDup[2], .refused(A.sameNameRefusal(label: "cam_b", other: "a")), "Second typed duplicate refused")
-    assertEqual(label(typedDup[1]), "CAM_B_2", "The automatic card avoids the typed name")
+    assertEqual(typedDup.map(label), ["CAM_B", "CAM_B_3", "cam_b_2"],
+                "Typed duplicates are numbered, not refused")
+    assertEqual(typedDup[2], .assigned(label: "cam_b_2", lanes: ["/D/cam_b_2"],
+                                       renamedFrom: "cam_b", reason: .sameNameInBatch),
+                "The later typed card records what it was numbered from")
+    assertTrue(typedDup.allSatisfy { label($0) != nil }, "No typed duplicate is refused")
 
-    // Editing one of them clears both.
+    // Distinct typed names are left alone.
     let fixedDup = run([typed("a", "CAM_B"), auto("b", "CAM_B"), typed("c", "CAM_C")])
-    assertEqual(fixedDup.map(label), ["CAM_B", "CAM_B_2", "CAM_C"], "Renaming one duplicate clears both")
+    assertEqual(fixedDup.map(label), ["CAM_B", "CAM_B_2", "CAM_C"], "Distinct typed names keep their names")
 
-    // A typed name is never renamed: a foreign folder refuses it.
+    // A typed name whose folder holds another card's footage used to be
+    // refused; now it is numbered (owner's rule, 2026-11-09).
     let typedTaken = run([typed("a", "A001")], foreign: ["/D/A001"])
-    assertEqual(typedTaken[0], .refused(A.existingFolderRefusal(label: "A001", lanePath: "/D/A001")),
-                "A typed name whose folder belongs to another card is refused, not renamed")
+    assertEqual(typedTaken[0], .assigned(label: "A001_2", lanes: ["/D/A001_2"], renamedFrom: "A001",
+                                         reason: .folderTaken(lanePath: "/D/A001")),
+                "A typed name whose folder belongs to another card is numbered, not refused")
+
+    // Two cards never share a lane, even when two names project to one
+    // folder: the second is numbered.
+    var sharedLane = A(entries: [typed("a", "P"), typed("b", "Q")])
+    var sharedGuard = 0
+    while let request = sharedLane.nextRequest() {
+        sharedGuard += 1
+        if sharedGuard > 50 { break }
+        let lane = request.label == "Q" ? "/D/P" : "/D/" + request.label
+        sharedLane.answer(.lanes([A.LaneProbe(path: lane, foreign: false)]))
+    }
+    assertEqual(sharedLane.outcomes.map(label), ["P", "Q_2"], "A lane already claimed is never assigned again")
 
     // Every numbered name taken: refused, not looped forever.
     var everything = Set<String>(["/D/X"])
@@ -821,10 +898,14 @@ static func testLabelAllocatorRules() async {
     assertTrue(numbered.hasSuffix("_12") && numbered.utf8.count <= 255, "Numbered names fit 255 bytes")
     assertEqual(BatchCardNaming.numbered("NO NAME", 1), "NO NAME", "The first card keeps its name")
 
-    // Rename notes.
-    assertEqual(A.renameNote(from: "NO NAME", reason: .sameNameInBatch),
-                "Renamed from \"NO NAME\": another card in this batch has the same name.",
+    // Rename notes: plain, short, and they say where the card is going.
+    assertEqual(A.renameNote(from: "CAM_B", to: "CAM_B_2", reason: .sameNameInBatch),
+                "Copying to \"CAM_B_2\": another card in this batch is already using \"CAM_B\".",
                 "Same-name note")
+    assertEqual(A.renameNote(from: "A001", to: "A001_2",
+                             reason: .folderTaken(lanePath: "/Volumes/Backup/Raws/A001")),
+                "Copying to \"A001_2\": \"A001\" on Backup already holds another card's footage.",
+                "Taken-folder note names the drive")
 }
 
 @MainActor
@@ -867,6 +948,25 @@ static func testLaneOwnershipMatchesEngineSpelling() async {
         assertEqual(parsed.metadata.previousDestinations, ["/Volumes/Backup/NO NAME_2"],
                     "previous_destinations reaches the batch")
         assertTrue(parsed.metadata.isKnownCard, "known reaches the batch")
+        assertEqual(parsed.metadata.datasetID, nil, "An engine without dataset_id reads as no record")
+
+        var withID = payload
+        withID["dataset_id"] = "abc123"
+        let idParsed = try StandardBatchSourceInspector.parseInspectionData(
+            try JSONSerialization.data(withJSONObject: withID), sourcePath: "/Volumes/NO NAME")
+        assertEqual(idParsed.metadata.datasetID, "abc123", "dataset_id reaches the batch")
+        withID["dataset_id"] = NSNull()
+        let nullParsed = try StandardBatchSourceInspector.parseInspectionData(
+            try JSONSerialization.data(withJSONObject: withID), sourcePath: "/Volumes/NO NAME")
+        assertEqual(nullParsed.metadata.datasetID, nil, "A null dataset_id is no record")
+        withID["dataset_id"] = 7
+        do {
+            _ = try StandardBatchSourceInspector.parseInspectionData(
+                try JSONSerialization.data(withJSONObject: withID), sourcePath: "/Volumes/NO NAME")
+            TestRecorder.shared.recordFail(message: "A non-string dataset_id must be refused", line: #line)
+        } catch {
+            assertTrue(error is BatchSourceStagingError, "A non-string dataset_id is an inspection failure")
+        }
     } catch {
         TestRecorder.shared.recordFail(message: "Unexpected parse error \(error)", line: #line)
     }
@@ -1182,8 +1282,9 @@ static func testAllOrNothingGuarantee() async {
         await testExistingDestinationLaneConflictRejection()
         await testLabelKeyIgnoresCaseWhenNumbering()
         await testKnownCardContinuesIntoItsOwnLane()
-        await testKnownCardBlockedByAnotherCardsLaneIsRefusedAlone()
-        await testTwoKnownCardsWithOneNameAreBothRefused()
+        await testKnownCardBlockedByAnotherCardsLaneIsNumbered()
+        await testTwoKnownCardsWithOneNameAreNumbered()
+        await testUnclaimedFolderKeepsItsName()
         await testLabelAllocatorRules()
         await testLaneOwnershipMatchesEngineSpelling()
         await testProtocolMismatchRejection()

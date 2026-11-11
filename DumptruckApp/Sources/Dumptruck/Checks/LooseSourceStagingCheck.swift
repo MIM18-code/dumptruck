@@ -327,6 +327,59 @@ enum LooseSourceStagingCheck {
         case .failure(let err):
             fatalError("buildPlan with {VolumeName} failed: \(err.message)")
         }
+        // 12. A taken name never stops single-card Start: the card gets the
+        //     next free number instead (Joshua, 2026-11-09: files picked off
+        //     B001 and C001 were refused because cards on record had carried
+        //     those names). Only another card's footage in the folder moves
+        //     the name; a remembered name, an empty folder, and files no card
+        //     on record claims all leave it alone.
+        do {
+            defaults.set("Raws", forKey: Pref.folderTemplate)
+            func named(_ base: String, _ registry: [CardFolderClaims.Record]) -> (plan: AppModel.LaunchPlan, label: String) {
+                switch model.planUnderFreeName(src: picked, rawRoots: [dest], base: base, registry: registry) {
+                case .success(let found): return found
+                case .failure(let err): fatalError("planUnderFreeName(\(base)) failed: \(err.message)")
+                }
+            }
+            let sameName = CardFolderClaims.Record(id: "other", label: "c001", destinations: [])
+            let firstName = named("C001", [sameName])
+            require(firstName.label == "C001" && firstName.plan.cardLabel == "C001",
+                    "a name another card carried is free where that card has no footage: \(firstName.label)")
+            let lane = firstName.plan.dests[0] + "/C001"
+            try fm.createDirectory(atPath: lane, withIntermediateDirectories: true)
+            try write(lane + "/.DS_Store", 16)
+            require(named("C001", [sameName]).label == "C001", "an empty folder is free")
+            try write(lane + "/clip.mov", 64)
+            require(named("C001", []).label == "C001",
+                    "files no card on record claims are a copy to resume, not a taken name")
+            let writer = CardFolderClaims.Record(id: "other", label: "C001", destinations: [lane])
+            let beside = named("C001", [writer])
+            require(beside.label == "C001_2" && beside.plan.cardLabel == "C001_2",
+                    "another card's footage in the folder moves this one to the next number: \(beside.label)")
+            if let flag = beside.plan.args.firstIndex(of: "--label") {
+                require(beside.plan.args[flag + 1] == "C001_2",
+                        "the engine is launched with the name the card got: \(beside.plan.args)")
+            } else {
+                fatalError("the plan must carry --label: \(beside.plan.args)")
+            }
+            require(named("C001", [sameName]).label == "C001_2",
+                    "an unclaimed folder with files belongs to the card on record with that name")
+            let lane2 = beside.plan.dests[0] + "/C001_2"
+            try fm.createDirectory(atPath: lane2, withIntermediateDirectories: true)
+            try write(lane2 + "/clip.mov", 64)
+            let third = CardFolderClaims.Record(id: "third", label: "C001_2", destinations: [lane2])
+            require(named("C001", [writer, third]).label == "C001_3", "numbering skips every taken folder")
+            require(!CardFolderClaims.isTaken(lane: lane, label: "C001", datasetID: "other", registry: [writer]),
+                    "a card's own folder is a continuation, never taken")
+            require(CardFolderClaims.isTaken(lane: lane, label: "C001", datasetID: "mine", registry: [writer]),
+                    "the same folder is taken for any other card")
+            let writing = Job(label: "LIVE", sourcePath: elsewhere, destinations: [firstName.plan.dests[0]])
+            writing.phase = .copying
+            model.jobs = [writing]
+            require(named("LIVE", []).label == "LIVE_2",
+                    "a folder another transfer in this window is writing counts as taken")
+            model.jobs = []
+        }
         if let savedTemplate { defaults.set(savedTemplate, forKey: Pref.folderTemplate) }
         else { defaults.removeObject(forKey: Pref.folderTemplate) }
         require(LooseSourceStaging.remove(onCard), "the test set removes")

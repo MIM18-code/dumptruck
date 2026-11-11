@@ -79,7 +79,12 @@ def _make_printer(as_json):
         elif kind == "source_inconsistent":
             print(f"  !! SOURCE INCONSISTENT {d['path']}", file=sys.stderr)
         elif kind == "name_collision":
-            print(f"  !! NAME COLLISION {d['path']} (existing copy preserved)", file=sys.stderr)
+            print(f"  !! NOT COPIED {d['path']} (a file with this name is already there; "
+                  "it was left as it is)", file=sys.stderr)
+        elif kind == "file_kept_both":
+            names = sorted({os.path.basename(rel) for rel in d["saved_as"].values()})
+            print(f"  ++ {d['path']} differs from the file already there; "
+                  f"saved beside it as {', '.join(names)}")
         elif kind == "file_failed":
             print(f"  !! FAILED {d['path']}: {d['error']}", file=sys.stderr)
         elif kind == "source_warning":
@@ -371,9 +376,10 @@ def cmd_offload(args):
 
     dataset_id = None if loose else (known["id"] if known else None)
     try:
-        # Loose files own no dataset, so the collision check runs with no
+        # Loose files own no dataset, so the folder check runs with no
         # exemption: a drop named after a real card must not be filed into
-        # that card's folder (Opus review 2026-09-15, finding 2).
+        # a folder that card's footage is in (Opus review 2026-09-15,
+        # finding 2).
         offender = identity.label_collision(label, dataset_id=dataset_id)
         # What the refusal protects is FOOTAGE, and that lives in the card
         # folder at these destinations. A folder with files in it belongs
@@ -398,24 +404,28 @@ def cmd_offload(args):
         when = time.strftime('%Y-%m-%d', time.localtime(rec.get('last_seen', 0)))
         return f"a DIFFERENT card ('{rec.get('format_name', '?')}', last seen {when})"
 
-    # Loose files never take a card's name, blank folder or not: they own
-    # no dataset, so the name cannot pass to them, and the card,
-    # re-inserted, would land on top of them (Opus review 2026-09-15,
-    # finding 2).
-    if taken or (loose and offender):
-        if taken:
-            card_root, owner = taken[0]
-            msg = (f"REFUSED: {describe(owner)} already owns the card name '{label}' and "
-                   f"its footage is in {card_root} — offloading would mix the two cards. "
-                   f"Pick another name with --label, or pass --force-label to override.")
-        else:
-            msg = (f"REFUSED: {describe(offender)} already owns the card name '{label}' — "
-                   f"offloading would invade its folder. "
-                   f"Pick another name with --label, or pass --force-label to override.")
+    # Only footage in the folder refuses. Picked files used to be refused
+    # for the name alone, whenever any card on record had ever carried it,
+    # so files picked off a card Dumptruck had seen before could not be
+    # copied at all (Joshua, 2026-11-09: picks off B001 and C001 refused
+    # into an empty destination). A name protects nothing; the copy never
+    # overwrites a file, and a card that later lands in the same folder is
+    # compared against what is there, file by file.
+    if taken:
+        card_root, owner = taken[0]
+        msg = (f"REFUSED: {describe(owner)} already owns the card name '{label}' and "
+               f"its footage is in {card_root} — offloading would mix the two cards. "
+               f"Pick another name with --label, or pass --force-label to override.")
         if not args.force_label:
             if args.json:
+                # The app has no flags to pass: say what is there and what
+                # to do about it in its terms.
+                when = time.strftime('%Y-%m-%d', time.localtime(owner.get('last_seen', 0)))
                 print(json.dumps({"event": "refused_label_collision", "label": label,
-                                  "message": msg}), flush=True)
+                                  "message": (f"{card_root} already holds another card's footage "
+                                              f"(last copied {when}). Give this card a different "
+                                              f"name and start again; nothing was copied.")}),
+                      flush=True)
                 _emit_failed_terminal()
             else:
                 print(msg, file=sys.stderr)
@@ -502,12 +512,15 @@ def cmd_offload(args):
     if True:
         try:
             first_card_root = os.path.join(result.destinations[0], label)
-            rels = [f.rel_path for f in result.files]
+            # Probe each clip where it sits on the first destination: a file
+            # saved beside an older one of the same name is not at its card
+            # path there. The report still lists it by its card path.
+            placed = {f.dest_rel(first_card_root): f.rel_path for f in result.files}
             minfo = {}
             if not args.no_report:
-                minfo = media.analyze_card(first_card_root, rels,
-                                           thumbs=not args.no_thumbs,
-                                           slate_first=args.slate_first)
+                minfo = {placed[rel]: info for rel, info in media.analyze_card(
+                    first_card_root, list(placed), thumbs=not args.no_thumbs,
+                    slate_first=args.slate_first).items()}
             paths, receipts = report.write_receipts_and_report(
                 result, att, card, minfo, dataset, html=not args.no_report)
             if not receipts:
@@ -745,6 +758,10 @@ def cmd_inspect(args):
         "suggested_label": ((known and known["label"]) or card.reel_name
                             or os.path.basename(os.path.normpath(args.source))),
         "known": bool(known),
+        # Which record on file is this card: the app compares it with the
+        # card that wrote a folder to tell a continuation from another
+        # card's footage before it settles the card's name.
+        "dataset_id": known["id"] if known else None,
         "ambiguous": ambiguous,
         "mounts": known.get("mounts", 0) if known else 0,
         "last_offload": known.get("last_offload") if known else None,

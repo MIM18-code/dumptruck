@@ -739,7 +739,10 @@ final class AppModel: ObservableObject {
     /// The card-name field's write path. Only this marks the name as the
     /// operator's; `label` stays a plain property so presets, retries and
     /// inspections can set it without claiming authorship.
-    func operatorEditedLabel(_ newValue: String) {
+    func operatorEditedLabel(_ typed: String) {
+        let newValue = CardLabelRules.cleaned(typed)
+        // The field shows what was typed until it is told otherwise.
+        if newValue != typed { objectWillChange.send() }
         guard newValue != label else { return }
         label = newValue
         labelEditedByUser = true
@@ -820,6 +823,7 @@ final class AppModel: ObservableObject {
     private func sourceDidMutate(monitoredPath path: String, monitorID: UUID) {
         guard sourceMonitorSession.accepts(monitorID),
               sourcePath == path else { return }
+        sourceMutationSeq += 1
         retireCurrentSourceAuthority(for: path)
 
         // The engine owns the active run and performs its own terminal source
@@ -833,9 +837,11 @@ final class AppModel: ObservableObject {
         sourceMutationRefreshTask?.cancel()
         sourceMutationRefreshTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 450_000_000)
-            guard !Task.isCancelled,
-                  let self,
-                  self.sourcePath == path,
+            guard !Task.isCancelled, let self else { return }
+            // Not cancelled, so no later change replaced this refresh: it is
+            // no longer pending whichever way it ends.
+            self.sourceMutationRefreshTask = nil
+            guard self.sourcePath == path,
                   !self.jobs.contains(where: { $0.isRunning && $0.sourcePath == path }) else { return }
             self.inspect(path)
         }
@@ -991,7 +997,8 @@ final class AppModel: ObservableObject {
             }
             guard let monitor = SourceMutationMonitor(
                 path: root, filter: .destinationJunk,
-                judge: DestinationChangeJudge(root: root, expectedHashes: job.verifiedFileHashes),
+                judge: DestinationChangeJudge(root: root,
+                                              expectedHashes: job.expectedHashes(forRoot: root)),
                 settled: { [weak self] in
                     Task { @MainActor [weak self] in self?.destinationMonitoringSettled(jobID: jobID) }
                 },
@@ -2115,6 +2122,12 @@ final class AppModel: ObservableObject {
     }
 
     private var inspectionToken = 0
+    /// Counts changes to the staged card, and which count the card was last
+    /// read at. A change re-reads the card by itself (sourceDidMutate), so
+    /// once that read lands Start has current facts and does not ask the
+    /// operator to press Re-read Card first (Joshua, 2026-11-09).
+    private var sourceMutationSeq = 0
+    private var inspectedMutationSeq = 0
 
     private func inspect(_ path: String) {
         inspecting = true
@@ -2127,6 +2140,7 @@ final class AppModel: ObservableObject {
         if !labelEditedByUser { label = "" }
         inspectionToken += 1
         let token = inspectionToken
+        let mutationSeq = sourceMutationSeq
         runEngine(["inspect", path] + LooseSourceStaging.engineFlags(for: path)) { [weak self] data in
             guard let self else { return }
             // A LATE result for a source the operator has moved on from must
@@ -2170,6 +2184,7 @@ final class AppModel: ObservableObject {
             ins.reelName = obj["reel_name"] as? String ?? ""
             ins.suggestedLabel = obj["suggested_label"] as? String ?? ""
             ins.known = obj["known"] as? Bool ?? false
+            ins.datasetID = obj["dataset_id"] as? String
             ins.mounts = obj["mounts"] as? Int ?? 0
             ins.files = obj["files"] as? Int ?? 0
             ins.bytes = (obj["bytes"] as? NSNumber)?.int64Value ?? 0
@@ -2182,10 +2197,12 @@ final class AppModel: ObservableObject {
                     ins.suggestedLabel = name
                 }
                 ins.known = false
+                ins.datasetID = nil
                 ins.mounts = 0
                 ins.previousDestinations = []
             }
             self.inspection = ins
+            self.inspectedMutationSeq = mutationSeq
             self.label = Self.labelAfterInspection(
                 current: self.label,
                 editedByUser: self.labelEditedByUser,
@@ -2382,7 +2399,13 @@ final class AppModel: ObservableObject {
         if let reason = launchBlockedReason { return reason }
         if sourcePath == nil { return Self.pickSourceReason }
         if let inspectionError { return inspectionError }
-        if sourceChangedSinceVerification { return Self.sourceChangedReason }
+        // A changed card is re-read without being asked. Until that read
+        // lands Start waits on it like any other card read; it only asks
+        // for a manual re-read when none is on its way.
+        if sourceChangedSinceVerification, inspectedMutationSeq != sourceMutationSeq {
+            return inspecting || sourceMutationRefreshTask != nil
+                ? Self.readingCardReason : Self.sourceChangedReason
+        }
         if destinationPaths.isEmpty { return Self.noDestinationReason }
         // Before the name check: while the card is read the field may still
         // be empty, and "Name the card" told the operator to do something
@@ -2513,7 +2536,7 @@ final class AppModel: ObservableObject {
         ["file_started", "file_progress", "file_done", "file_skipped_duplicate",
          "file_skipped_content_match", "source_reread_progress", "verify_progress",
          "verification_failed", "source_inconsistent", "name_collision",
-         "file_failed"].contains(event ?? "")
+         "file_kept_both", "file_failed"].contains(event ?? "")
     }
 
     private static func journalRelevantEvent(_ event: String?) -> Bool {
@@ -2841,13 +2864,16 @@ final class AppModel: ObservableObject {
             let frozenContinuationRender = continuationFreeze
             clearStagedRetry()
             continuationFreeze = frozenContinuationRender
-            switch buildPlan(src: src, rawRoots: destinationPaths,
-                             cardLabel: label, fast: fast) {
+            switch planUnderFreeName(src: src, rawRoots: destinationPaths,
+                                     base: label, fast: fast) {
             case .failure(let e):
                 lastSetupError = e.message
                 return
-            case .success(let p):
-                plan = p
+            case .success(let named):
+                plan = named.plan
+                // The job, the journal and the engine all take the name
+                // from here, so the bench shows the one the card got.
+                if named.label != label { label = named.label }
             }
         }
         // One-shot consumed: the plan (fresh or retry) is frozen now.
@@ -3047,6 +3073,7 @@ final class AppModel: ObservableObject {
         stopDestinationMonitoring(forSource: job.sourcePath, except: job.id)
         armDestinationAuthority(for: job)
         job.verifiedFileHashes.removeAll()
+        job.savedAsPaths.removeAll()
         objectWillChange.send()  // re-gate the Start button + eject locks NOW
         playSound(for: job)
         switch job.verdict {
@@ -3299,6 +3326,40 @@ final class AppModel: ObservableObject {
     }
 
     struct PlanError: Error { let message: String }
+
+    /// Single-card Start's plan under the first name whose card folder is
+    /// free on every destination: the name asked for, then "C001_2",
+    /// "C001_3"… A folder that holds another card's footage is not a reason
+    /// to stop the copy; the card goes beside it under the next number, the
+    /// way a batch already names its cards (Joshua, 2026-11-09). A folder a
+    /// transfer in this window is already writing counts as taken too.
+    func planUnderFreeName(
+        src: String,
+        rawRoots: [String],
+        base: String,
+        fast: Bool = false,
+        registry: [CardFolderClaims.Record] = CardFolderClaims.loadRegistry()
+    ) -> Result<(plan: LaunchPlan, label: String), PlanError> {
+        let datasetID = LooseSourceStaging.isStagedSet(src) ? nil : inspection?.datasetID
+        let busy = Set(jobs.filter { $0.isRunning && $0.sourcePath != src }
+            .flatMap(verdictLaneRoots).map(BatchCardNaming.labelKey))
+        for attempt in 1...BatchCardNaming.maxSuffix {
+            let candidate = BatchCardNaming.numbered(base, attempt)
+            switch buildPlan(src: src, rawRoots: rawRoots, cardLabel: candidate, fast: fast) {
+            case .failure(let error):
+                return .failure(error)
+            case .success(let plan):
+                let taken = plan.dests.contains { dest in
+                    let lane = (dest as NSString).appendingPathComponent(candidate)
+                    return busy.contains(BatchCardNaming.labelKey(lane))
+                        || CardFolderClaims.isTaken(lane: lane, label: candidate,
+                                                    datasetID: datasetID, registry: registry)
+                }
+                if !taken { return .success((plan, candidate)) }
+            }
+        }
+        return .failure(PlanError(message: BatchLabelAllocator.exhaustedRefusal(label: base)))
+    }
 
     func buildPlan(
         src: String,
@@ -4166,6 +4227,27 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// One sentence for a file the engine could not copy or verify, in the
+    /// operator's words. The engine's event names ("name_collision: …") used
+    /// to be shown as they came (Joshua, 2026-11-09).
+    static func fileProblemLine(event: String, path: String,
+                                destination: String?, detail: String?) -> String {
+        let place = destination.map { " on \($0)" } ?? ""
+        let why = detail.map { " (\($0))" } ?? ""
+        switch event {
+        case "verification_failed":
+            return "The copy of \(path)\(place) did not match the card\(why). "
+                + "That copy was discarded; the card still has the file."
+        case "source_inconsistent":
+            return "\(path) read differently twice from the card. The card or reader may be failing."
+        case "name_collision":
+            return "\(path) was not copied\(place): a file with that name is already there "
+                + "and a second copy could not be saved beside it. The file there was left as it is."
+        default:
+            return "\(path) could not be copied\(place)\(why)."
+        }
+    }
+
     /// Returns false when a safety-bearing event is missing required fields —
     /// the caller must treat that as a protocol violation and fail closed.
     static func apply(event obj: [String: Any], to job: Job) -> Bool {
@@ -4213,6 +4295,9 @@ final class AppModel: ObservableObject {
                let text = obj["xxh64"] as? String, text.count == 16,
                let hash = UInt64(text, radix: 16) {
                 job.verifiedFileHashes[path] = hash
+                if let savedAs = obj["saved_as"] as? [String: String] {
+                    for (root, rel) in savedAs { job.savedAsPaths[root, default: [:]][path] = rel }
+                }
             }
             job.bytesFinished += (obj["bytes"] as? NSNumber)?.int64Value ?? 0
             job.notePipelineActivity(verifyingCopy: false)
@@ -4251,11 +4336,18 @@ final class AppModel: ObservableObject {
             // evidence, never counted into any total — it just tells the
             // stall readout the pipeline is moving.
             job.notePipelineActivity(verifyingCopy: true)
+        case "file_kept_both":
+            // A different file already had this name, so the engine saved
+            // this one beside it ("C0001_2.MP4") and verified it like any
+            // other. Nothing failed and nothing was replaced: the file's
+            // done event counts it, and the report says where it went.
+            break
         case "verification_failed", "source_inconsistent", "name_collision", "file_failed":
-            let path = obj["path"] as? String ?? "?"
-            let dest = (obj["destination"] as? String).map { " at \($0)" } ?? ""
-            let detail = (obj["error"] as? String).map { " (\($0))" } ?? ""
-            job.error("\(obj["event"] as? String ?? "error"): \(path)\(dest)\(detail)")
+            job.error(fileProblemLine(
+                event: obj["event"] as? String ?? "",
+                path: obj["path"] as? String ?? "a file",
+                destination: obj["destination"] as? String,
+                detail: obj["error"] as? String))
         case "source_reread_started":
             job.phase = .sourceVerify
             job.currentFile = ""

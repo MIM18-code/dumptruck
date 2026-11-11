@@ -143,9 +143,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
         let alert = NSAlert()
         alert.alertStyle = .critical
         alert.messageText = "A transfer is still running"
-        alert.informativeText = "Quitting stops the engine mid-copy. Nothing already "
-            + "verified is lost, but this run will NOT finish or seal manifests — "
-            + "the result is \(Job.Verdict.unverified.displayLine) until a full run completes."
+        alert.informativeText = "Quitting stops the copy. Everything already verified stays "
+            + "on the drives. The rest of the card needs another run, and until then it "
+            + "shows as \(Job.Verdict.unverified.displayLine)."
         alert.addButton(withTitle: "Keep Transferring")
         alert.addButton(withTitle: "Quit Anyway")
         if alert.runModal() == .alertFirstButtonReturn { return .terminateCancel }

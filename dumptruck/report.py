@@ -356,8 +356,13 @@ def build_report(result, att, card_info, media_info, dataset=None):
             if fallback_reasons:
                 probe_note += f" — {_esc(fallback_reasons)}"
             probe_note += "</span>"
+        saved_as = sorted({os.path.basename(rel)
+                           for rel in (getattr(f, "dest_names", None) or {}).values()})
+        beside_note = (f'<br><span class="warn">a different file already had this name; '
+                       f'saved beside it as {_esc(", ".join(saved_as))}</span>'
+                       if saved_as else "")
         rows.append(f"""<tr>
-<td class="mono">{_esc(f.rel_path)}</td>
+<td class="mono">{_esc(f.rel_path)}{beside_note}</td>
 <td>{_human(f.size)}</td>
 <td>{_esc(p.get('timecode') or '')}</td>
 <td>{_dur(p.get('duration_s'))}</td>
@@ -493,9 +498,13 @@ def build_report(result, att, card_info, media_info, dataset=None):
         "network_shares": _share_lists(result),
         # Per-file hash table: this is where requested extra checksums
         # (sha256/md5/sha1/c4) actually ship — manifests seal xxh64 only.
+        # "saved_as" appears only on a file that was saved beside an
+        # existing different file of the same name: card folder -> the path
+        # it has there.
         "files": [
             {"path": f.rel_path, "size": f.size, "outcome": f.outcome(),
-             "hashes": f.hashes or {}, "status": f.dest_status}
+             "hashes": f.hashes or {}, "status": f.dest_status,
+             **({"saved_as": dict(f.dest_names)} if getattr(f, "dest_names", None) else {})}
             for f in result.files
         ],
     }
@@ -727,6 +736,19 @@ def validate_receipt_dict(d, filepath="<memory>"):
             _validate_text(destination, f"files[{index}].status destination")
             if state not in _DESTINATION_STATUSES:
                 raise ValueError(f"Malformed receipt '{filepath}': files[{index}].status value is invalid")
+
+        # Optional: card folder -> the path a file has there when it was
+        # saved beside an existing different file of the same name.
+        saved_as = item.get("saved_as", {})
+        if not isinstance(saved_as, dict) or len(saved_as) > MAX_STATUS_ENTRIES_PER_FILE:
+            raise ValueError(f"Malformed receipt '{filepath}': files[{index}].saved_as is invalid")
+        for destination, saved in saved_as.items():
+            _validate_text(destination, f"files[{index}].saved_as destination")
+            _validate_text(saved, f"files[{index}].saved_as path", maximum=4096)
+            if saved.startswith("/") or "\\" in saved \
+                    or any(part in ("", ".", "..") for part in saved.split("/")):
+                raise ValueError(
+                    f"Malformed receipt '{filepath}': files[{index}].saved_as path is not relative")
 
     files_total = _bounded_integer(d.get("files_total", len(files)), "files_total",
                                    maximum=MAX_FILES_PER_RECEIPT)
@@ -984,9 +1006,17 @@ def build_wrap_report(receipts, title=None):
         hashes = f.get("hashes", {})
         primary_hash = hashes.get("xxh64") or hashes.get("sha256") or hashes.get("md5") or (next(iter(hashes.values())) if hashes else "")
 
+        # The hash in this row belongs to the file where it was saved. When
+        # a different file already had the name, that is a numbered name
+        # beside it, and the row says which.
+        saved_names = sorted({os.path.basename(rel)
+                              for rel in (f.get("saved_as") or {}).values()})
+        beside_note = (f'<br><span class="warn">a different file already had this name; '
+                       f'saved beside it as {_esc(", ".join(saved_names))}</span>'
+                       if saved_names else "")
         clip_rows.append(f"""<tr>
 <td class="mono"><strong>{_esc(card_lbl)}</strong></td>
-<td class="mono">{_esc(rel_path)}</td>
+<td class="mono">{_esc(rel_path)}{beside_note}</td>
 <td class="mono">{_human(size)}</td>
 <td class="mono">{_esc(primary_hash)}</td>
 <td>{st}</td>

@@ -80,6 +80,14 @@ class FileResult:
     skipped: bool = False  # trusted from a prior verified generation everywhere
     dest_status: dict = field(default_factory=dict)  # card_root -> status
     errors: list = field(default_factory=list)
+    # card_root -> path below it, only where the file was saved beside an
+    # existing different file of the same name (see _reader_loop).
+    dest_names: dict = field(default_factory=dict)
+
+    def dest_rel(self, card_root) -> str:
+        """Where this file is under card_root: its own path, unless that name
+        was already another file's and this one was saved beside it."""
+        return self.dest_names.get(card_root, self.rel_path)
 
     def outcome(self) -> str:
         if self.skipped:
@@ -838,8 +846,9 @@ def _defer_sigint():
 
 def _copy_one(source_file, entry, dest_specs, hash_formats, progress,
               source_fd=None, src_rel=None, staged_out=None):
-    """Read source once; hash + fan out. dest_specs = [(dest_file, root_fd)].
-    Commits writers only when the byte count matches the scan snapshot and the
+    """Read source once; hash + fan out. dest_specs = [(dest_file, root_fd)],
+    or (dest_file, root_fd, rel) to stage under a path other than the
+    source's own. Commits writers only when the byte count matches the scan snapshot and the
     source stayed stable. Returns (hashes|None,
     {dest_file: (error, tmp_name, leaf_fd)}, source_error|None, io_flags).
     With source_fd, the source opens through a NOFOLLOW component walk from
@@ -848,8 +857,9 @@ def _copy_one(source_file, entry, dest_specs, hash_formats, progress,
     (round-12 structural pass). staged_out, if supplied, receives ownership
     before the writer drain delivers any deferred interrupt."""
     hashers = hasher.make_hashers(hash_formats)  # may raise: BEFORE writers start
-    writers = [_DestWriter(df, entry, root_fd, entry.rel_path)
-               for df, root_fd in dest_specs]
+    writers = [_DestWriter(spec[0], entry, spec[1],
+                           spec[2] if len(spec) > 2 else entry.rel_path)
+               for spec in dest_specs]
     read = 0
     source_error = None
     reraise = None
@@ -1340,9 +1350,8 @@ def offload(
         # empty. all([]) is True, so letting this continue would report a
         # green fully-verified job in which nothing was read or written.
         raise RuntimeError(
-            f"source contains no copyable files: {source_root} — wrong "
-            "volume, unmounted card, or empty card. Refusing to report "
-            "success for a job that would copy nothing.")
+            f"There are no copyable files on {source_root}. The card is empty, "
+            "or the wrong one is mounted. Nothing was copied.")
     # Camera-history is source inventory too: snapshot its existence and
     # contents BEFORE copying, so its disappearance/mutation mid-job can
     # never escape both the source-change and camera-history gates
@@ -1869,9 +1878,7 @@ class _VerifyCommitWorker(threading.Thread):
         if last:
             fr, entry = task["fr"], task["entry"]
             try:
-                self.ev({"event": "file_done", "path": entry.rel_path, "bytes": entry.size,
-                         "outcome": fr.outcome(), "xxh64": fr.hashes.get("xxh64"),
-                         "status": fr.dest_status})
+                self.ev(_file_done_event(fr, entry))
             except BaseException as e:  # noqa: BLE001 — a dying event sink must
                 # never kill the worker (an unjoined worker hangs the drain).
                 with self.lock:
@@ -1883,6 +1890,97 @@ class _VerifyCommitWorker(threading.Thread):
                 pending["done"].set()
 
 
+# How far "_2", "_3"… go before a second file of one name is given up on.
+BESIDE_LIMIT = 999
+
+
+def _beside_name(name, n):
+    """"C0001.MP4" -> "C0001_2.MP4": the name a file takes when a different
+    file already has its own. The number goes before the extension so the
+    file still opens as what it is; the stem is trimmed, never the number or
+    the extension, to stay inside the 255-byte name limit."""
+    stem, ext = os.path.splitext(name)
+    tail = f"_{n}{ext}"
+    while stem and len((stem + tail).encode("utf-8")) > 255:
+        stem = stem[:-1]
+    return stem + tail
+
+
+def _name_key(rel):
+    """One key per destination name: APFS and exFAT fold case and Unicode."""
+    return unicodedata.normalize("NFC", rel.replace(os.sep, "/")).casefold()
+
+
+def _place_beside(root_fd, rel_path, size, want_hash, result, reserved):
+    """Where a file goes when a DIFFERENT file already has its name at this
+    destination. Returns ("match", rel) when an earlier run already saved
+    these exact bytes beside it, else ("free", rel) for the first numbered
+    name nothing uses. `reserved` holds name keys that are spoken for: every
+    path the source carries, and names handed out earlier in this run.
+    Raises OSError when the folder cannot be read or no name is free."""
+    rel_dir, name = os.path.dirname(rel_path), os.path.basename(rel_path)
+    leaf = _secure_leaf_fd(root_fd, rel_dir)
+    try:
+        for n in range(2, BESIDE_LIMIT + 1):
+            candidate = _beside_name(name, n)
+            rel = os.path.join(rel_dir, candidate) if rel_dir else candidate
+            if _name_key(rel) in reserved:
+                continue
+            try:
+                st = os.stat(candidate, dir_fd=leaf, follow_symlinks=False)
+            except FileNotFoundError:
+                return "free", rel
+            if stat_mod.S_ISREG(st.st_mode) and st.st_size == size \
+                    and _cold_hash(candidate, result, dir_fd=leaf) == want_hash:
+                return "match", rel
+        raise OSError(errno.EEXIST, f"every name up to "
+                                    f"{_beside_name(name, BESIDE_LIMIT)} is in use")
+    finally:
+        os.close(leaf)
+
+
+def _file_done_event(fr, entry):
+    """A file's closing event. "saved_as" is present only when the file sits
+    under another name at some destination (card folder -> path there): the
+    app watches the copies it was told about, and the hash in this event
+    belongs to that file, not to the one at the card path."""
+    event = {"event": "file_done", "path": entry.rel_path, "bytes": entry.size,
+             "outcome": fr.outcome(), "xxh64": fr.hashes.get("xxh64"),
+             "status": fr.dest_status}
+    if fr.dest_names:
+        event["saved_as"] = dict(fr.dest_names)
+    return event
+
+
+def _space_needed(card_root, entry, reserved=frozenset()):
+    """Bytes this file will add under card_root, for the free-space
+    preflight. A file not there yet adds its size. So does one whose name a
+    different-sized file already has: it is saved beside that file, unless
+    an earlier run already saved it there. A file of the same size adds
+    nothing: it is the same file, or content decides later (a same-size
+    different file is rare, and running out of room for it fails that file
+    cleanly, not the files before it). `reserved` is the name keys of the
+    card's own paths; numbered names are walked the way _place_beside walks
+    them, skipping those."""
+    dest = os.path.join(card_root, entry.rel_path)
+    try:
+        if os.stat(dest).st_size == entry.size:
+            return 0
+    except OSError:
+        return entry.size
+    rel_dir, name = os.path.split(entry.rel_path)
+    for n in range(2, BESIDE_LIMIT + 1):
+        candidate = os.path.join(rel_dir, _beside_name(name, n))
+        if _name_key(candidate) in reserved:
+            continue
+        try:
+            if os.stat(os.path.join(card_root, candidate)).st_size == entry.size:
+                return 0
+        except OSError:
+            break
+    return entry.size
+
+
 def _reader_loop(source_root, result, card_roots, entries, hash_formats,
                  verify_mode, reverify_existing, history, verify_workers,
                  iolock, ev, root_fds, source_fd, verify_admission):
@@ -1890,6 +1988,9 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
     writes and handing verify/commit to the per-destination pipeline workers.
     All destination I/O flows through the pinned root descriptors in root_fds."""
     progress_beat = {"last_emit_time": 0.0}
+    # Names a file saved beside another may not take: a path the card itself
+    # carries would collide with that file when its turn comes.
+    reserved_names = {_name_key(e.rel_path) for e in entries}
     for entry in entries:
         source_file = os.path.join(source_root, entry.rel_path)
         fr = FileResult(rel_path=entry.rel_path, size=entry.size, mtime_ns=entry.mtime_ns)
@@ -1901,6 +2002,7 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
         # destination's own verified history), conflict (exists otherwise), absent.
         state = {}
         state_errors = {}
+        twins = set()  # destinations whose file has the source's size and date
         for cr in dest_files:
             hist = history[cr].get(histkey)
             leaf_fd = None
@@ -1913,9 +2015,11 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
                 except FileNotFoundError:
                     st = None
                     exists = False
-                if (exists and _metadata_match_at(
-                        leaf_fd, os.path.basename(entry.rel_path), entry)
-                        and hist and hist.get("size") == entry.size
+                twin = exists and _metadata_match_at(
+                    leaf_fd, os.path.basename(entry.rel_path), entry)
+                if twin:
+                    twins.add(cr)
+                if (twin and hist and hist.get("size") == entry.size
                         and not reverify_existing):
                     state[cr] = "trusted"
                 elif exists:
@@ -1958,6 +2062,11 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
             ev({"event": "file_progress", "path": rel, "done": done, "size": size})
 
         write_errors = {}
+        # Staged by the second read of a file saved beside another. Kept
+        # apart from write_errors: _copy_one clears the dictionary it is
+        # handed when an interrupt lands mid-drain, and that must not drop
+        # the first read's staged copies from this loop's cleanup.
+        beside_staged = {}
         try:
             with verify_admission.writes(to_write):
                 fr_hashes, write_errors, source_error, io_flags = _copy_one(
@@ -1997,6 +2106,8 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
 
             # Trusted/conflict adjudication FIRST (workers must see final statuses
             # for every non-write destination before they compute the outcome).
+            differs = []  # destinations holding a DIFFERENT file under this name
+            damaged = {}  # cr -> why the file already there looks damaged
             for cr, st_ in state.items():
                 if st_ == "unreadable":
                     fr.dest_status[cr] = "failed"
@@ -2039,15 +2150,116 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
                         fr.dest_status[cr] = "skipped"
                         ev({"event": "file_skipped_content_match", "path": entry.rel_path,
                             "bytes": entry.size, "destination": cr})
-                    else:
+                    elif existing is None:
+                        # The file there could not be read, so nothing says
+                        # what it is. Leave it and do not guess a second name.
                         fr.dest_status[cr] = "conflict"
                         with iolock:
                             result.errors.append(
-                                f"{entry.rel_path} -> {cr}: NAME COLLISION with different content "
-                                "(possible in-camera filename reuse). Existing copy preserved; "
-                                "new file NOT written. Resolve manually or offload under a new card name."
-                            )
+                                f"{entry.rel_path} -> {cr}: a file with this name is already "
+                                "there and could not be read to compare. It was left as it "
+                                "is and this one was not copied.")
                         ev({"event": "name_collision", "path": entry.rel_path, "destination": cr})
+                    else:
+                        differs.append(cr)
+                        # An older version of a file is ordinary. A file that
+                        # no longer matches its own sealed checksum, or that
+                        # has the card file's exact size and date but other
+                        # bytes, is damage, and the operator is told.
+                        sealed = (history[cr].get(histkey) or {}).get("hashes", {}).get("xxh64")
+                        if sealed and sealed != existing:
+                            damaged[cr] = ("no longer matches its own checksum record, "
+                                           "so it is damaged")
+                        elif cr in twins:
+                            damaged[cr] = ("has the same size and date as the card's file "
+                                           "but different contents, so one of the two is damaged")
+
+            # A different file already has this name. Nothing is overwritten
+            # and the copy does not stop: this file is saved beside it under
+            # the next free number ("C0001_2.MP4"). Cameras rewrite their index
+            # files and reuse clip numbers, so a card dumped twice into one
+            # folder hit this every time and failed the whole job (Joshua,
+            # 2026-11-09: copy it safely, overwrite nothing, do not refuse).
+            # The second read is checked against the first, and the staged
+            # copy goes through the same verify-then-commit path as any file.
+            beside = {}  # cr -> (absolute path, path below the card root)
+            for cr in differs:
+                try:
+                    kind, rel = _place_beside(root_fds[cr], entry.rel_path, entry.size,
+                                              fr.hashes.get("xxh64"), result, reserved_names)
+                except OSError as e:
+                    fr.dest_status[cr] = "conflict"
+                    with iolock:
+                        result.errors.append(
+                            f"{entry.rel_path} -> {cr}: a different file with this name is "
+                            f"already there and a second copy could not be saved beside it "
+                            f"({e}). The existing file was left as it is and this one was "
+                            "not copied.")
+                    ev({"event": "name_collision", "path": entry.rel_path, "destination": cr})
+                    continue
+                fr.dest_names[cr] = rel
+                if kind == "match":
+                    fr.dest_status[cr] = "skipped"
+                    ev({"event": "file_skipped_content_match", "path": entry.rel_path,
+                        "bytes": entry.size, "destination": cr})
+                    if cr in damaged:
+                        # Still there and still damaged: say so on every run
+                        # that reads it, not only the one that saved the copy.
+                        note = (f"{entry.rel_path} on {cr}: the copy that was already "
+                                f"there {damaged[cr]}. The card's file is saved beside "
+                                f"it as {os.path.basename(rel)}.")
+                        with iolock:
+                            result.warnings.append(note)
+                        ev({"event": "source_warning", "message": note})
+                else:
+                    beside[cr] = (os.path.join(cr, rel), rel)
+            if beside:
+                with verify_admission.writes({cr: df for cr, (df, _rel) in beside.items()}):
+                    again, _staged, again_error, again_flags = _copy_one(
+                        source_file, entry,
+                        [(df, root_fds[cr], rel) for cr, (df, rel) in beside.items()],
+                        hash_formats, None, source_fd=source_fd,
+                        staged_out=beside_staged)
+                if again_error is None and again.get("xxh64") != fr.hashes.get("xxh64"):
+                    again_error = OSError(5, "the card returned different bytes on a second read")
+                if again_error is not None:
+                    # The staged copies stay in beside_staged: the finally
+                    # below removes them, since no worker ever owned them.
+                    for cr in beside:
+                        fr.dest_status[cr] = "failed"
+                        fr.dest_names.pop(cr, None)
+                        fr.errors.append(f"source read failed: {again_error}")
+                        with iolock:
+                            result.errors.append(
+                                f"{entry.rel_path} -> {cr}: source read failed: {again_error}")
+                    ev({"event": "file_failed", "path": entry.rel_path,
+                        "error": str(again_error)})
+                else:
+                    # One table from here on: submission and cleanup both
+                    # read write_errors. Moved under a deferred interrupt so
+                    # no staged copy is ever in neither table.
+                    with _defer_sigint():
+                        write_errors.update(beside_staged)
+                        beside_staged.clear()
+                    if macio.IS_MACOS:
+                        result.io_nocache_all &= again_flags["writers_nocache"]
+                        result.io_flush_all &= again_flags["writers_flush"]
+                    for cr, (df, rel) in beside.items():
+                        if macio.IS_MACOS and df in again_flags.get("flush_failures", {}):
+                            _note_flush(result, cr, again_flags["flush_failures"][df],
+                                        df in again_flags.get("flush_hard", ()))
+                        reserved_names.add(_name_key(rel))
+                        to_write[cr] = df
+                    ev({"event": "file_kept_both", "path": entry.rel_path,
+                        "saved_as": {cr: rel for cr, (_df, rel) in beside.items()}})
+                    for cr, (_df, rel) in beside.items():
+                        if cr in damaged:
+                            note = (f"{entry.rel_path} on {cr}: the copy that was already "
+                                    f"there {damaged[cr]}. The card's file was saved beside "
+                                    f"it as {os.path.basename(rel)}.")
+                            with iolock:
+                                result.warnings.append(note)
+                            ev({"event": "source_warning", "message": note})
             if any(s == "trusted" for s in fr.dest_status.values()):
                 # Mixed run: trusted on some destinations, written or adjudicated
                 # on the rest. The trusted copies were still never read, so the
@@ -2075,7 +2287,7 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
                         verify_workers[cr].submit({
                             "fr": fr, "entry": entry, "cr": cr,
                             "tmp": tmp, "leaf_fd": leaf_fd,
-                            "final": os.path.basename(entry.rel_path),
+                            "final": os.path.basename(fr.dest_rel(cr)),
                             "verify_mode": verify_mode, "pending": pending})
                         # The worker now owns this temp and descriptor.
                         write_errors[to_write[cr]] = (None, tmp, None)
@@ -2088,14 +2300,13 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
                         raise RuntimeError(
                             f"verify task completion failed for {entry.rel_path}")
             else:
-                ev({"event": "file_done", "path": entry.rel_path, "bytes": entry.size,
-                    "outcome": fr.outcome(), "xxh64": fr.hashes.get("xxh64"),
-                    "status": fr.dest_status})
+                ev(_file_done_event(fr, entry))
         finally:
             # Adjudication and task submission can both raise after staging.
             # Release only copies whose ownership never reached a worker.
             with _defer_sigint():
-                for _err, tmp, leaf_fd in write_errors.values():
+                for _err, tmp, leaf_fd in (list(write_errors.values())
+                                           + list(beside_staged.values())):
                     if leaf_fd is not None:
                         try:
                             os.remove(tmp, dir_fd=leaf_fd)
@@ -2184,9 +2395,12 @@ def _offload_locked(source_root, result, card_roots, entries, hash_formats,
             result.history_binding_by_root[cr] = _hist_ident
 
     # Free-space preflight: refuse before the first byte, not at ENOSPC.
-    # Only ABSENT files consume space (conflicts/trusted/reverify are hashed,
-    # never written), and destinations sharing one filesystem share one pool.
+    # Files not there yet consume space, and so do files saved beside a
+    # different file of the same name (_space_needed); trusted and
+    # content-matched files are hashed, never written. Destinations sharing
+    # one filesystem share one pool.
     needed_by_dev, free_by_dev, roots_by_dev = {}, {}, {}
+    reserved_names = frozenset(_name_key(e.rel_path) for e in entries)
     for cr in card_roots:
         _require_pinned(cr, "before free-space preflight")
         try:
@@ -2194,8 +2408,7 @@ def _offload_locked(source_root, result, card_roots, entries, hash_formats,
             st = os.statvfs(cr)
             free_by_dev[dev] = st.f_bavail * st.f_frsize
             roots_by_dev.setdefault(dev, []).append(cr)
-            needed = sum(e.size for e in entries
-                         if not os.path.exists(os.path.join(cr, e.rel_path)))
+            needed = sum(_space_needed(cr, e, reserved_names) for e in entries)
             needed_by_dev[dev] = needed_by_dev.get(dev, 0) + needed
         except OSError as e:
             raise RuntimeError(

@@ -9,6 +9,23 @@ enum CardLabelRules {
     /// The engine's own folders inside a lane; a card may not be named after them.
     static let reserved: Set<String> = ["reports", "ascmhl", "ascmhl_camera"]
 
+    /// What the operator typed, with the characters a folder name cannot
+    /// hold swapped for a dash as they type: "11/09/26" becomes "11-09-26"
+    /// instead of blocking Start with "illegal path character" (Joshua,
+    /// 2026-11-09). Control characters are dropped. Everything else, spaces
+    /// included, is left exactly as typed.
+    static func cleaned(_ label: String) -> String {
+        var out = ""
+        for scalar in label.unicodeScalars {
+            if scalar == "/" || scalar == "\\" || scalar == ":" {
+                out.append("-")
+            } else if !CharacterSet.controlCharacters.contains(scalar) {
+                out.unicodeScalars.append(scalar)
+            }
+        }
+        return out
+    }
+
     /// Nil when the label is usable, otherwise the sentence to show.
     static func validate(_ label: String) -> String? {
         let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)

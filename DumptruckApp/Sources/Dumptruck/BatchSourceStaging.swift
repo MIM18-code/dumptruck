@@ -40,19 +40,26 @@ public struct CardInspectionMetadata: Hashable, Sendable, Codable {
     /// it is how the batch tells a re-inserted card continuing into its own
     /// folder from a different card that happens to share the name.
     public let previousDestinations: [String]
+    /// The engine's record id for this card (`dataset_id`), nil for a card
+    /// not on record, for picked files, and from engines that predate the
+    /// field. `CardFolderClaims.isTaken` uses it to tell this card's own
+    /// folder from another card's.
+    public let datasetID: String?
 
     public init(
         label: String? = nil,
         totalBytes: Int64 = 0,
         fileCount: Int = 0,
         customProperties: [String: String] = [:],
-        previousDestinations: [String] = []
+        previousDestinations: [String] = [],
+        datasetID: String? = nil
     ) {
         self.label = label
         self.totalBytes = totalBytes
         self.fileCount = fileCount
         self.customProperties = customProperties
         self.previousDestinations = previousDestinations
+        self.datasetID = datasetID
     }
 
     /// The engine recognized this card from an earlier offload.
@@ -222,18 +229,26 @@ public enum BatchCardNaming {
 /// rules this way.
 ///
 /// Rules (Joshua, 2026-09-28: "if it's a bunch of Sony A7S3s, gonna be a
-/// lot of bullshit with the same default name"):
-/// - A fixed name is never changed: one the operator typed, or a known
-///   card's own name, which is the engine's continuation key. Two fixed
-///   cards with one name refuse both; a fixed name whose folder already
-///   exists and was not written by this card refuses that card.
-/// - Every other card starts from the engine's suggestion. In drag order,
-///   the first card with a name keeps it; a later card, or one whose folder
-///   on a destination belongs to a different card, takes the next free
-///   numbered name ("NO NAME_2"). Numbered names skip any name that another
-///   card in the batch carries on its own.
-/// - Only that card is refused when naming fails. Two cards never get one
-///   lane, and no card is given a lane that exists and is not its own.
+/// lot of bullshit with the same default name"; 2026-11-09: never refuse to
+/// copy a card over a naming question, copy it under a free name instead):
+/// - Every card starts from its base name: the one the operator typed, a
+///   known card's own name, or the engine's suggestion. When that name is
+///   taken, the card gets the next free numbered name ("NO NAME_2"). No
+///   name is refused for being taken.
+/// - A name is taken when a card earlier in allocation order carries it,
+///   or when one of its lanes is already some other card's lane in this
+///   batch, or when a lane holds another card's footage (the caller's
+///   probe, `CardFolderClaims.isTaken`). Numbered names also skip any name
+///   another card in the batch carries as its own base.
+/// - Allocation order: fixed cards (typed names, known cards) first, so
+///   they keep their base name ahead of automatic ones, then the rest. Each
+///   group keeps drag order, so of two fixed cards with one name the
+///   earlier keeps it and the later is numbered.
+/// - The only naming refusal is running out of numbers
+///   (`exhaustedRefusal`). The caller may still refuse a card for reasons
+///   no name fixes (a folder template refusal, an invalid destination
+///   root). Two cards never get one lane, and no card is given a lane that
+///   holds another card's footage.
 public struct BatchLabelAllocator {
     public struct Entry: Equatable {
         public let source: String
@@ -241,6 +256,8 @@ public struct BatchLabelAllocator {
         public let displayName: String
         /// A usable base name, already checked by the caller.
         public let label: String
+        /// Typed by the operator, or a known card's own name. Fixed cards
+        /// are named first; they are numbered like any other when taken.
         public let fixed: Bool
 
         public init(source: String, displayName: String, label: String, fixed: Bool) {
@@ -258,7 +275,9 @@ public struct BatchLabelAllocator {
 
     public struct LaneProbe: Equatable {
         public let path: String
-        /// The folder exists and this card did not write it.
+        /// The folder holds another card's footage
+        /// (`CardFolderClaims.isTaken`). An empty folder, this card's own
+        /// folder, and a folder of files no card on record claims are free.
         public let foreign: Bool
 
         public init(path: String, foreign: Bool) {
@@ -309,17 +328,6 @@ public struct BatchLabelAllocator {
             let key = BatchCardNaming.labelKey(entries[index].label)
             if naturalOwner[key] == nil { naturalOwner[key] = index }
         }
-        var fixedByKey: [String: [Int]] = [:]
-        for index in fixed {
-            fixedByKey[BatchCardNaming.labelKey(entries[index].label), default: []].append(index)
-        }
-        for index in fixed {
-            let key = BatchCardNaming.labelKey(entries[index].label)
-            guard let group = fixedByKey[key], group.count > 1,
-                  let other = group.first(where: { $0 != index }) else { continue }
-            outcomes[index] = .refused(Self.sameNameRefusal(
-                label: entries[index].label, other: entries[other].displayName))
-        }
     }
 
     /// The next name to probe, or nil when every card has an outcome.
@@ -331,11 +339,6 @@ public struct BatchLabelAllocator {
             if outcomes[index] != nil {
                 advance()
                 continue
-            }
-            if entry.fixed {
-                let request = Request(index: index, label: entry.label)
-                pending = request
-                return request
             }
             while attempt <= BatchCardNaming.maxSuffix {
                 let label = BatchCardNaming.numbered(entry.label, attempt, maxLength: maxLabelLength)
@@ -368,23 +371,11 @@ public struct BatchLabelAllocator {
             let collision = probes.first { claimedLanes[BatchCardNaming.labelKey($0.path)] != nil }
             let taken = probes.first { $0.foreign }
             if collision != nil || taken != nil {
-                if entry.fixed {
-                    if let taken {
-                        outcomes[request.index] = .refused(Self.existingFolderRefusal(
-                            label: request.label, lanePath: taken.path))
-                    } else if let collision,
-                              let other = claimedLanes[BatchCardNaming.labelKey(collision.path)] {
-                        outcomes[request.index] = .refused(
-                            "Its destination folder \(collision.path) is also the folder of "
-                            + "\(entries[other].displayName). Rename one of them.")
-                    }
-                    advance()
-                } else {
-                    if attempt == 1 {
-                        firstRejection = taken.map { .folderTaken(lanePath: $0.path) } ?? .sameNameInBatch
-                    }
-                    attempt += 1
+                // Fixed or not, the card moves on to the next number.
+                if attempt == 1 {
+                    firstRejection = taken.map { .folderTaken(lanePath: $0.path) } ?? .sameNameInBatch
                 }
+                attempt += 1
                 return
             }
             claimedLabels[BatchCardNaming.labelKey(request.label)] = request.index
@@ -408,30 +399,30 @@ public struct BatchLabelAllocator {
         pending = nil
     }
 
-    // Refusals say what to do next: the fix is always a different name.
-
-    public static func sameNameRefusal(label: String, other: String) -> String {
-        "Another card in this batch (\(other)) is also named \"\(label)\". Rename one of them."
-    }
-
-    public static func existingFolderRefusal(label: String, lanePath: String) -> String {
-        "A folder named \"\(label)\" already exists at \(lanePath) and this card did not "
-            + "write it. Rename this card."
-    }
-
     public static func exhaustedRefusal(label: String) -> String {
         "Every name from \"\(label)\" to \"\(label)_\(BatchCardNaming.maxSuffix)\" is already "
             + "taken. Rename this card."
     }
 
-    /// The note under an automatically renamed card.
-    public static func renameNote(from original: String, reason: RenameReason?) -> String {
+    /// The note under a card that is copying under a numbered name.
+    public static func renameNote(from original: String, to label: String,
+                                  reason: RenameReason?) -> String {
         switch reason {
-        case .folderTaken?:
-            return "Renamed from \"\(original)\": a different card already has a folder with that name on the destination."
+        case .folderTaken(let lanePath)?:
+            return "Copying to \"\(label)\": \"\(original)\" on \(placeName(ofLane: lanePath)) "
+                + "already holds another card's footage."
         case .sameNameInBatch?, nil:
-            return "Renamed from \"\(original)\": another card in this batch has the same name."
+            return "Copying to \"\(label)\": another card in this batch is already using \"\(original)\"."
         }
+    }
+
+    /// Where a card folder sits, in the words the operator uses: the drive
+    /// name for a folder on a mounted drive, else the folder that holds it.
+    static func placeName(ofLane lanePath: String) -> String {
+        let parts = lanePath.split(separator: "/", omittingEmptySubsequences: true)
+        if parts.count >= 3, parts[0] == "Volumes" { return String(parts[1]) }
+        let parent = (lanePath as NSString).deletingLastPathComponent
+        return (parent as NSString).abbreviatingWithTildeInPath
     }
 }
 
@@ -582,10 +573,21 @@ public protocol BatchSourceFileSystem: Sendable {
     /// The path with symlinks resolved, for comparing a lane with the card
     /// folders the engine recorded. The default is the path unchanged.
     func resolvedPath(_ path: String) -> String
+    /// True when the folder at `path` holds at least one real file
+    /// (`CardFolderClaims.holdsFiles`). The default treats any existing lane
+    /// as holding files.
+    func laneHoldsFiles(atPath path: String) async throws -> Bool
+    /// The engine's card record, read once per preflight. The default is an
+    /// empty record, so a test double never reads the real one.
+    func cardRegistry() -> [CardFolderClaims.Record]
 }
 
 public extension BatchSourceFileSystem {
     func resolvedPath(_ path: String) -> String { path }
+    func laneHoldsFiles(atPath path: String) async throws -> Bool {
+        try await destinationLaneExists(atPath: path)
+    }
+    func cardRegistry() -> [CardFolderClaims.Record] { [] }
 }
 
 /// Card inspector protocol returning metadata and protocol version.
@@ -866,11 +868,14 @@ public final class BatchSourceStagingCore: Sendable {
         }
 
         // Step I: Name every card, then project its lanes. The allocator
-        // keeps two cards off one lane and keeps a card out of an existing
-        // lane it did not write; a card it cannot name is refused on its
-        // own, with its inspection kept, instead of refusing the batch.
-        // A known card keeps its name (the continuation key) and may write
-        // into its own existing folder, as single-card Start allows.
+        // keeps two cards off one lane and keeps a card out of a folder that
+        // holds another card's footage, numbering it instead; a card it
+        // cannot name is refused on its own, with its inspection kept,
+        // instead of refusing the batch. A known card is named first and
+        // may write into its own existing folder, as single-card Start
+        // allows. "Taken" is the engine's rule (CardFolderClaims), with the
+        // card record read once for the whole pass.
+        let registry = options.disallowExistingDestinationLanes ? fileSystem.cardRegistry() : []
         let entries = inspectedItems.map { item in
             BatchLabelAllocator.Entry(
                 source: item.verified.normalizedPath,
@@ -900,11 +905,13 @@ public final class BatchSourceStagingCore: Sendable {
                 }
                 var foreign = false
                 if options.disallowExistingDestinationLanes,
-                   try await fileSystem.destinationLaneExists(atPath: lanePath) {
-                    foreign = !BatchCardNaming.laneBelongsToCard(
-                        lanePath,
-                        known: item.inspection.metadata.isKnownCard,
-                        previousDestinations: item.inspection.metadata.previousDestinations,
+                   try await fileSystem.laneHoldsFiles(atPath: lanePath) {
+                    foreign = CardFolderClaims.isTaken(
+                        lane: lanePath,
+                        label: request.label,
+                        datasetID: item.inspection.metadata.datasetID,
+                        registry: registry,
+                        holdsFiles: { _ in true },
                         resolve: fileSystem.resolvedPath)
                 }
                 probes.append(BatchLabelAllocator.LaneProbe(path: lanePath, foreign: foreign))
@@ -1106,6 +1113,14 @@ public final class StandardBatchSourceFileSystem: BatchSourceFileSystem, @unchec
 
     public func resolvedPath(_ path: String) -> String {
         (path as NSString).resolvingSymlinksInPath
+    }
+
+    public func laneHoldsFiles(atPath path: String) async throws -> Bool {
+        CardFolderClaims.holdsFiles(path)
+    }
+
+    public func cardRegistry() -> [CardFolderClaims.Record] {
+        CardFolderClaims.loadRegistry()
     }
 }
 
@@ -1352,6 +1367,9 @@ public final class StandardBatchSourceInspector: BatchSourceInspector, @unchecke
         _ = try requiredBool("known")
         _ = try requiredBool("ambiguous")
         let mounts = try requiredNonNegativeInt("mounts")
+        // The card's record id. Older engines leave it out; absent and null
+        // both mean no record.
+        let datasetID = try nullableString("dataset_id")
         let files = try requiredNonNegativeInt("files")
         let bytes = try requiredNonNegativeInt64("bytes")
 
@@ -1369,7 +1387,8 @@ public final class StandardBatchSourceInspector: BatchSourceInspector, @unchecke
             ],
             // Kept whole: it is how a known card's existing folder is told
             // apart from a different card's folder with the same name.
-            previousDestinations: previous
+            previousDestinations: previous,
+            datasetID: datasetID
         )
         return BatchInspectionResult(protocolVersion: protocolNumber, metadata: metadata)
     }

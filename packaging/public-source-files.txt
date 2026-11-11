@@ -14,6 +14,7 @@ DumptruckApp/Sources/Dumptruck/Arcade/TruckAnimations.swift
 DumptruckApp/Sources/Dumptruck/BatchSourceStaging.swift
 DumptruckApp/Sources/Dumptruck/BatchSourceStagingModel.swift
 DumptruckApp/Sources/Dumptruck/CameraComponentTerms.swift
+DumptruckApp/Sources/Dumptruck/CardFolderClaims.swift
 DumptruckApp/Sources/Dumptruck/CardLabelRules.swift
 DumptruckApp/Sources/Dumptruck/Checks/BatchSourceStagingCheck.swift
 DumptruckApp/Sources/Dumptruck/Checks/CameraTermsCheck.swift

@@ -117,6 +117,45 @@ enum SetupFlowCheck {
         try await settle("re-read")
         require(model.label == "MY_CARD", "the re-read must not replace a typed name, got \(model.label)")
 
+        // 7. A card that changes after it was read re-reads itself, and Start
+        //    then goes ahead. It used to stay blocked on "re-read it before
+        //    starting" until the operator pressed Re-read Card, though the
+        //    fresh read had already landed (Joshua, 2026-11-09).
+        if model.engineConfigurationError == nil, model.inspectionError == nil,
+           model.sourceMutationMonitoringActive {
+            require(model.startBlockedReason == nil,
+                    "a read card with a name and a destination can start, got "
+                    + String(describing: model.startBlockedReason))
+            try Data("new clip".utf8).write(to: URL(fileURLWithPath: card + "/clip2.mov"))
+            for _ in 0..<200 where !model.sourceChangedSinceVerification {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            require(model.sourceChangedSinceVerification, "the watcher sees the new clip")
+            let pending = model.startBlockedReason
+            require(pending == AppModel.readingCardReason,
+                    "while the changed card is re-read Start waits on the read, got "
+                    + String(describing: pending))
+            for _ in 0..<300 where model.startBlockedReason == AppModel.readingCardReason {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            require(model.startBlockedReason == nil,
+                    "once the changed card is re-read Start goes ahead, got "
+                    + String(describing: model.startBlockedReason))
+            require(model.inspection?.files == 2, "the re-read counted the new clip")
+            require(model.label == "MY_CARD", "the automatic re-read keeps the typed name")
+            print("SetupFlowCheck: changed-card Start gate exercised against a real card read")
+        } else {
+            print("SetupFlowCheck: changed-card Start gate NOT exercised (no engine or no watcher)")
+        }
+
+        // 8. Characters a folder name cannot hold become a dash as they are
+        //    typed, instead of blocking Start afterwards.
+        model.operatorEditedLabel("11/09:26\\A")
+        require(model.label == "11-09-26-A", "typed separators become dashes, got \(model.label)")
+        require(CardLabelRules.validate(model.label) == nil, "the cleaned name is usable")
+        require(CardLabelRules.cleaned("Day 2 – B cam") == "Day 2 – B cam", "ordinary names are untouched")
+        model.operatorEditedLabel("MY_CARD")
+
         // 4. Removing a destination clears a refusal it caused.
         model.lastSetupError = "stale refusal"
         model.unassignDestination(dest)

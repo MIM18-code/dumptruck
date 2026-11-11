@@ -152,6 +152,33 @@ enum DesktopQACheck {
             expectedHashes: ["clip.mov": vectors.first(where: { $0.0 == 4 })!.1])
         directJudge.capture()
         require(!directJudge.isReady, "a baseline with the wrong engine checksum must fail closed")
+        // A file saved beside an older one of the same name is watched where
+        // it was saved. Checked at its card path, the watch compared the new
+        // hash with the older file and withdrew a good SAFE verdict (Codex
+        // review of PR 18).
+        let besideRoot = r3Root + "/BESIDE/CARD"
+        try FileManager.default.createDirectory(atPath: besideRoot, withIntermediateDirectories: true)
+        let olderBytes = (0..<4097).map { UInt8($0 % 251) }
+        let newerBytes = (0..<1048613).map { UInt8($0 % 251) }
+        try Data(olderBytes).write(to: URL(fileURLWithPath: besideRoot + "/clip.mov"))
+        try Data(newerBytes).write(to: URL(fileURLWithPath: besideRoot + "/clip_2.mov"))
+        let besideJob = Job(label: "CARD", sourcePath: r3Root + "/BESIDE/SRC", destinations: [r3Root + "/BESIDE"])
+        require(AppModel.apply(event: [
+            "event": "file_done", "path": "clip.mov", "bytes": 1048613, "outcome": "verified",
+            "xxh64": "4ceb0aec2321345e", "status": [besideRoot: "verified"],
+            "saved_as": [besideRoot: "clip_2.mov"],
+        ], to: besideJob), "a file_done with saved_as is a valid event")
+        require(besideJob.expectedHashes(forRoot: besideRoot) == ["clip_2.mov": 0x4ceb0aec2321345e],
+                "the hash is expected at the saved-as name: \(besideJob.expectedHashes(forRoot: besideRoot))")
+        require(besideJob.expectedHashes(forRoot: r3Root + "/OTHER") == ["clip.mov": 0x4ceb0aec2321345e],
+                "a destination that holds the file at its card path keeps that path")
+        let besideJudge = DestinationChangeJudge(
+            root: besideRoot, expectedHashes: besideJob.expectedHashes(forRoot: besideRoot))
+        besideJudge.capture()
+        require(besideJudge.isReady, "the baseline holds with the older file still at the card path")
+        let cardPathJudge = DestinationChangeJudge(root: besideRoot, expectedHashes: besideJob.verifiedFileHashes)
+        cardPathJudge.capture()
+        require(!cardPathJudge.isReady, "checked at the card path the same folder fails, which was the bug")
         let missingJudge = DestinationChangeJudge(root: r3Root + "/missing", expectedHashes: ["x": 1])
         missingJudge.capture()
         require(!missingJudge.isReady && missingJudge.provesChange(r3Root + "/missing"),
@@ -427,14 +454,31 @@ enum DesktopQACheck {
                     root: batchDest, label: "X", volumeName: "V", cameraFormat: "?", reel: "",
                     mirroredFolder: "", template: "", project: "") == batchDest,
                 "no template means root/label, as before")
-        // The existing-lane refusal looks at the same rendered path. The
-        // label was typed, so it is refused (with the fix), never renamed.
-        try fm.createDirectory(atPath: batchDest + "/QA_PROJECT/Raws/R2_BATCH_ONE", withIntermediateDirectories: true)
+        // The taken-folder check looks at the same rendered path. It used to
+        // refuse a typed label whose folder existed at all; owner's rule,
+        // 2026-11-09: an empty folder is free, and a folder holding another
+        // card's footage numbers the typed name instead of refusing it.
+        let renderedLane = batchDest + "/QA_PROJECT/Raws/R2_BATCH_ONE"
+        try fm.createDirectory(atPath: renderedLane, withIntermediateDirectories: true)
         staging.revalidateAll(appModel: model)
-        require(candidate.status == .refused(BatchLabelAllocator.existingFolderRefusal(
-                    label: "R2_BATCH_ONE", lanePath: batchDest + "/QA_PROJECT/Raws/R2_BATCH_ONE")),
-                "an existing rendered lane is refused: \(candidate.status)")
-        require(candidate.inspection != nil, "a refused card keeps its inspection")
+        require(candidate.status == .ready && candidate.effectiveLabel == "R2_BATCH_ONE"
+                    && candidate.projectedLanes == [renderedLane] && candidate.renameNote == nil,
+                "an empty existing rendered lane keeps the name: \(candidate.status) \(candidate.effectiveLabel)")
+        try Data([1]).write(to: URL(fileURLWithPath: renderedLane + "/C0001.MP4"))
+        staging.cardRegistry = { [CardFolderClaims.Record(
+            id: "someone-else", label: "OTHER", destinations: [renderedLane])] }
+        staging.revalidateAll(appModel: model)
+        require(candidate.status == .ready && candidate.effectiveLabel == "R2_BATCH_ONE_2",
+                "a typed name whose rendered lane holds another card's footage is numbered: "
+                    + "\(candidate.status) \(candidate.effectiveLabel)")
+        require(candidate.customLabel == "R2_BATCH_ONE", "the field keeps what was typed")
+        require(candidate.projectedLanes == [batchDest + "/QA_PROJECT/Raws/R2_BATCH_ONE_2"],
+                "the numbered lane is the rendered one: \(candidate.projectedLanes)")
+        require(candidate.renameNote == BatchLabelAllocator.renameNote(
+                    from: "R2_BATCH_ONE", to: "R2_BATCH_ONE_2",
+                    reason: .folderTaken(lanePath: renderedLane)),
+                "the note says where the card is going: \(candidate.renameNote ?? "nil")")
+        staging.cardRegistry = { [] }
         try fm.removeItem(atPath: batchDest + "/QA_PROJECT")
         // A cleared label is an error, not a silent fallback to the suggestion.
         for cleared in ["", "   "] {
@@ -497,16 +541,16 @@ enum DesktopQACheck {
 
         // ---- Same-name cards (Joshua, 2026-09-28): a stack of one camera
         // model mounts with one default name. They are numbered, not
-        // refused; a typed duplicate refuses only the cards involved and
-        // clears on the next edit; a folder from a different card is
-        // stepped around; a known card still continues into its own folder.
+        // refused; a typed duplicate is numbered too (2026-11-09); a folder
+        // holding a different card's footage is stepped around; a known card
+        // still continues into its own folder.
         let nameDest = root.appendingPathComponent("NAME_DEST").path
         try fm.createDirectory(atPath: nameDest, withIntermediateDirectories: true)
         require(model.assignDroppedDestinations([nameDest]), "stage the naming destination")
         let namingTemplate = defaults.object(forKey: Pref.folderTemplate)
         defaults.set("", forKey: Pref.folderTemplate)   // lanes are <root>/<label>
         func sameNameCard(_ dir: String, known: Bool = false,
-                          previous: [String] = []) throws -> BatchSourceCandidate {
+                          previous: [String] = [], id: String? = nil) throws -> BatchSourceCandidate {
             let path = root.appendingPathComponent(dir).path
             try fm.createDirectory(atPath: path, withIntermediateDirectories: true)
             let a = try fm.attributesOfItem(atPath: path)
@@ -518,12 +562,20 @@ enum DesktopQACheck {
                     .resourceValues(forKeys: [.volumeUUIDStringKey]))?.volumeUUIDString)
             card.inspection = CardInspection(format: "sony_xavc_s", formatName: "Sony XAVC S",
                                              reelName: "", suggestedLabel: "NO NAME", known: known,
+                                             datasetID: id,
                                              mounts: known ? 1 : 0, files: 1, bytes: 1,
                                              previousDestinations: previous)
             card.seedAutomaticLabel("NO NAME")   // what the preflight writes
             return card
         }
+        // The card record these checks see: one earlier card wrote
+        // <dest>/NO NAME. Never the operator's real record.
+        let noNameLane = nameDest + "/NO NAME"
+        let namingRecord: () -> [CardFolderClaims.Record] = {
+            [CardFolderClaims.Record(id: "a7s-1", label: "NO NAME", destinations: [noNameLane])]
+        }
         let sameNames = BatchSourceStagingModel()
+        sameNames.cardRegistry = namingRecord
         let a7s = try (1...3).map { try sameNameCard("A7S_\($0)") }
         sameNames.candidates = a7s
         sameNames.revalidateAll(appModel: model)
@@ -534,37 +586,90 @@ enum DesktopQACheck {
                 "only the renamed cards carry a note")
         require(sameNames.generalError == nil && sameNames.canQueueBatch, "nothing blocks the batch")
 
-        // The operator types one name on two cards: those two are refused,
-        // inspections kept; the third is untouched.
+        // The operator types one name on two cards. Both used to be
+        // refused; owner's rule, 2026-11-09: the earlier in drag order keeps
+        // it, the later copies as "CAM_B_2" with a note, and the field keeps
+        // "CAM_B" as its base, so later passes never make "CAM_B_2_2".
         sameNames.updateLabel(id: a7s[1].id, newLabel: "CAM_B", appModel: model)
         sameNames.updateLabel(id: a7s[2].id, newLabel: "CAM_B", appModel: model)
-        require(a7s[1].status == .refused(BatchLabelAllocator.sameNameRefusal(label: "CAM_B", other: "A7S_3"))
-                    && a7s[2].status == .refused(BatchLabelAllocator.sameNameRefusal(label: "CAM_B", other: "A7S_2")),
-                "a typed duplicate refuses both cards that carry it: \(a7s.map(\.status))")
-        require(a7s[0].status == .ready, "the other card stays Ready")
-        require(a7s[1].inspection != nil && a7s[2].inspection != nil, "refused cards keep their inspection")
+        for pass in 1...2 {
+            if pass == 2 { sameNames.revalidateAll(appModel: model) }
+            require(a7s.allSatisfy { $0.status == .ready },
+                    "typed duplicates are Ready (pass \(pass)): \(a7s.map(\.status))")
+            require(a7s.map(\.effectiveLabel) == ["NO NAME", "CAM_B", "CAM_B_2"],
+                    "the later typed duplicate is numbered (pass \(pass)): \(a7s.map(\.effectiveLabel))")
+            require(a7s[1].customLabel == "CAM_B" && a7s[2].customLabel == "CAM_B",
+                    "both fields keep the typed text (pass \(pass)): \(a7s.map(\.customLabel))")
+            require(a7s[2].projectedLanes == [nameDest + "/CAM_B_2"],
+                    "the numbered card's lane is the numbered one (pass \(pass))")
+            require(a7s[1].renameNote == nil && a7s[2].renameNote == BatchLabelAllocator.renameNote(
+                        from: "CAM_B", to: "CAM_B_2", reason: .sameNameInBatch),
+                    "only the numbered card carries a note (pass \(pass)): \(a7s[2].renameNote ?? "nil")")
+        }
+        require(sameNames.canQueueBatch, "typed duplicates do not block the batch")
         sameNames.updateLabel(id: a7s[2].id, newLabel: "CAM_C", appModel: model)
         require(a7s.allSatisfy { $0.status == .ready }, "one edit clears the duplicate: \(a7s.map(\.status))")
+        require(a7s[2].effectiveLabel == "CAM_C" && a7s[2].renameNote == nil,
+                "a distinct typed name copies as typed, with no note")
         require(a7s[0].effectiveLabel == "NO NAME", "the untouched card keeps its name")
 
-        // Yesterday's "NO NAME" folder, from a different card: the new
-        // card is numbered around it, never written into it.
-        try fm.createDirectory(atPath: nameDest + "/NO NAME", withIntermediateDirectories: true)
+        // Yesterday's "NO NAME" folder. The engine's rule (owner's rule,
+        // 2026-11-09, same as single-card Start): an empty folder is free,
+        // and so is a folder of files no card on record claims (a stopped
+        // first copy resumes into it). Only footage a different card on
+        // record wrote makes the new card step around it. This used to
+        // number the card as soon as the folder existed.
+        try fm.createDirectory(atPath: noNameLane, withIntermediateDirectories: true)
         let fresh = try sameNameCard("A7S_4")
         let taken = BatchSourceStagingModel()
+        taken.cardRegistry = namingRecord
         taken.candidates = [fresh]
         taken.revalidateAll(appModel: model)
+        require(fresh.status == .ready && fresh.effectiveLabel == "NO NAME" && fresh.renameNote == nil,
+                "an empty existing folder keeps the name: \(fresh.status) \(fresh.effectiveLabel)")
+        try Data([1]).write(to: URL(fileURLWithPath: noNameLane + "/C0001.MP4"))
+        taken.cardRegistry = { [] }
+        taken.revalidateAll(appModel: model)
+        require(fresh.status == .ready && fresh.effectiveLabel == "NO NAME" && fresh.renameNote == nil,
+                "a folder of files no card on record claims keeps the name: \(fresh.effectiveLabel)")
+        taken.cardRegistry = namingRecord
+        taken.revalidateAll(appModel: model)
         require(fresh.status == .ready && fresh.effectiveLabel == "NO NAME_2",
-                "a different card steps around an existing folder: \(fresh.status) \(fresh.effectiveLabel)")
+                "a different card steps around another card's footage: \(fresh.status) \(fresh.effectiveLabel)")
         require(fresh.projectedLanes == [nameDest + "/NO NAME_2"], "its lane is the numbered one")
         require(fresh.renameNote == BatchLabelAllocator.renameNote(
-                    from: "NO NAME", reason: .folderTaken(lanePath: nameDest + "/NO NAME")),
-                "the note says a different card owns the folder")
+                    from: "NO NAME", to: "NO NAME_2", reason: .folderTaken(lanePath: noNameLane)),
+                "the note says another card's footage is there: \(fresh.renameNote ?? "nil")")
+
+        // A typed name whose folder holds another card's footage is
+        // numbered too, and keeps its typed text as the base.
+        let camDLane = nameDest + "/CAM_D"
+        try fm.createDirectory(atPath: camDLane, withIntermediateDirectories: true)
+        try Data([1]).write(to: URL(fileURLWithPath: camDLane + "/C0001.MP4"))
+        let typedIntoTaken = try sameNameCard("A7S_4B")
+        let typedTaken = BatchSourceStagingModel()
+        typedTaken.cardRegistry = { [CardFolderClaims.Record(
+            id: "cam-d", label: "CAM_D", destinations: [camDLane])] }
+        typedTaken.candidates = [typedIntoTaken]
+        typedTaken.updateLabel(id: typedIntoTaken.id, newLabel: "CAM_D", appModel: model)
+        require(!typedIntoTaken.labelIsAutomatic, "the name counts as typed")
+        for pass in 1...2 {
+            if pass == 2 { typedTaken.revalidateAll(appModel: model) }
+            require(typedIntoTaken.status == .ready && typedIntoTaken.effectiveLabel == "CAM_D_2"
+                        && typedIntoTaken.customLabel == "CAM_D",
+                    "a typed name on another card's footage is numbered (pass \(pass)): "
+                        + "\(typedIntoTaken.status) \(typedIntoTaken.effectiveLabel) field \(typedIntoTaken.customLabel)")
+            require(typedIntoTaken.projectedLanes == [nameDest + "/CAM_D_2"], "its lane is the numbered one")
+            require(typedIntoTaken.renameNote == BatchLabelAllocator.renameNote(
+                        from: "CAM_D", to: "CAM_D_2", reason: .folderTaken(lanePath: camDLane)),
+                    "the typed card carries the note too")
+        }
 
         // The card that wrote that folder comes back: it continues into it,
         // and the new card with the same default name is numbered instead.
-        let returning = try sameNameCard("A7S_1_AGAIN", known: true, previous: [nameDest + "/NO NAME"])
+        let returning = try sameNameCard("A7S_1_AGAIN", known: true, previous: [noNameLane], id: "a7s-1")
         let continuing = BatchSourceStagingModel()
+        continuing.cardRegistry = namingRecord
         let newcomer = try sameNameCard("A7S_5")
         continuing.candidates = [newcomer, returning]
         continuing.revalidateAll(appModel: model)
@@ -574,15 +679,21 @@ enum DesktopQACheck {
         require(newcomer.status == .ready && newcomer.effectiveLabel == "NO NAME_2",
                 "the newcomer is numbered even though it was dragged first")
 
-        // A known card whose folder here belongs to someone else is not
-        // renamed behind the operator's back; only it is refused.
-        let stranger = try sameNameCard("A7S_6", known: true, previous: ["/Volumes/ELSEWHERE/NO NAME"])
+        // A known card whose folder here holds another card's footage used
+        // to be refused to keep its continuation key. Owner's rule,
+        // 2026-11-09: it copies under the next free name, with a note.
+        let stranger = try sameNameCard("A7S_6", known: true, previous: ["/Volumes/ELSEWHERE/NO NAME"],
+                                        id: "a7s-6")
         let blocked = BatchSourceStagingModel()
+        blocked.cardRegistry = namingRecord
         blocked.candidates = [stranger]
         blocked.revalidateAll(appModel: model)
-        require(stranger.status == .refused(BatchLabelAllocator.existingFolderRefusal(
-                    label: "NO NAME", lanePath: nameDest + "/NO NAME")),
-                "a known card blocked by another card's folder is refused alone: \(stranger.status)")
+        require(stranger.status == .ready && stranger.effectiveLabel == "NO NAME_2",
+                "a known card blocked by another card's folder is numbered: \(stranger.status) \(stranger.effectiveLabel)")
+        require(stranger.projectedLanes == [nameDest + "/NO NAME_2"], "it never writes into the other card's folder")
+        require(stranger.renameNote == BatchLabelAllocator.renameNote(
+                    from: "NO NAME", to: "NO NAME_2", reason: .folderTaken(lanePath: noNameLane)),
+                "the known card says why it moved")
         defaults.set(namingTemplate, forKey: Pref.folderTemplate)
         model.unassignDestination(nameDest)
 

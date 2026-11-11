@@ -468,6 +468,22 @@ def write_ascmhl(card_root, file_results, action="original", author=None,
     return path
 
 
+class _AtDestination:
+    """A file result as it sits under ONE card folder. A manifest describes
+    the folder it is in, so it names each file by the path it has there:
+    normally the path it had on the card, but a file saved beside an existing
+    different file of the same name ("C0001_2.MP4") is listed under the name
+    it was saved as (engine.FileResult.dest_names)."""
+
+    def __init__(self, fr, card_root):
+        self._fr = fr
+        names = getattr(fr, "dest_names", None) or {}
+        self.rel_path = names.get(card_root, fr.rel_path)
+
+    def __getattr__(self, name):
+        return getattr(self._fr, name)
+
+
 def write_ascmhl_bound(card_root, file_results, action="original", author=None,
                        warnings=None, root_fd=None):
     """Append one ASC MHL generation describing THIS card folder; update the
@@ -505,7 +521,7 @@ def write_ascmhl_bound(card_root, file_results, action="original", author=None,
             file_action = "original"
         else:
             file_action = action
-        recordable.append((fr, file_action))
+        recordable.append((_AtDestination(fr, card_root), file_action))
     if not recordable:
         return None, None
 
@@ -713,7 +729,7 @@ def write_mhl_v11(card_root, file_results, started_at, finished_at, root_fd=None
     only files that actually succeeded at THIS destination are listed.
     Returns its path, or None with nothing to record. Descriptor-relative."""
     rows = [
-        fr for fr in file_results
+        _AtDestination(fr, card_root) for fr in file_results
         if fr.hashes and "xxh64" in fr.hashes
         and (not fr.dest_status or fr.dest_status.get(card_root) in _RECORDABLE)
         # size-only (fast mode) and trusted are deliberately excluded: the

@@ -170,6 +170,9 @@ struct CardInspection {
     var reelName = ""
     var suggestedLabel = ""
     var known = false
+    /// The engine's record id for a known card, nil otherwise. Tells this
+    /// card's own folder from another card's (CardFolderClaims).
+    var datasetID: String?
     var mounts = 0
     var files = 0
     var bytes: Int64 = 0
@@ -431,6 +434,20 @@ final class Job: ObservableObject, Identifiable {
     private var phaseStartFiles = 0
     // Runtime evidence from file_done, never restored as current authority.
     var verifiedFileHashes: [String: UInt64] = [:]
+    /// Card folder -> card path -> the path the file has in that folder,
+    /// for files the engine saved beside a different file of the same name
+    /// (file_done "saved_as"). Runtime evidence like the hashes above.
+    var savedAsPaths: [String: [String: String]] = [:]
+
+    /// The verified hashes keyed by where each file sits under `root`. A
+    /// file saved beside another is checked at the name it was saved as:
+    /// the file at its card path there is the older one, left untouched.
+    func expectedHashes(forRoot root: String) -> [String: UInt64] {
+        guard let renamed = savedAsPaths[root], !renamed.isEmpty else { return verifiedFileHashes }
+        var out: [String: UInt64] = [:]
+        for (path, hash) in verifiedFileHashes { out[renamed[path] ?? path] = hash }
+        return out
+    }
     @Published var destinationCheckPending = false
     private var copyProgressByPath: [String: Int64] = [:]
     private(set) var copyBytesRead: Int64 = 0

@@ -135,9 +135,37 @@ def scenario_mixed_trust_blocks_wipe(base):
         res85d = engine.offload(src85, [d85a, d85b], label="R3_MIXED_TRUST",
                                 reverify_existing=True)
         att85d = res85d.attestation()
-        check("--reverify-existing fails the damaged copy explicitly",
-              not res85d.ok and not att85d["safe_to_wipe_source"]
-              and any("mixed_unique.txt" in e for e in res85d.errors), str(res85d.errors))
+        # The damage is named and the card's good bytes are saved beside
+        # the damaged copy; the dump itself does not fail (Joshua
+        # 2026-11-09: copy safely, overwrite nothing, never refuse).
+        good85 = os.path.join(d85a, "R3_MIXED_TRUST", "mixed_unique_2.txt")
+        # Both drives now hold a copy read back this run, so the card is
+        # covered again; the damaged file is still there, named in a warning.
+        check("--reverify-existing names the damaged copy and saves the card's file beside it",
+              res85d.ok and att85d["independently_verified_destinations"] == 2
+              and any("mixed_unique.txt" in w and "damaged" in w for w in res85d.warnings)
+              and os.path.isfile(good85)
+              and hasher.hash_file(good85, ["xxh64"])["xxh64"] == src_hash85
+              and hasher.hash_file(copy_a, ["xxh64"])["xxh64"] != src_hash85,
+              f"{res85d.errors} {res85d.warnings}")
+        # The damaged file is still there on the next read, so it is named
+        # again; the good copy beside it is recognised, not copied a third
+        # time (Sol r1, S1).
+        res85d2 = engine.offload(src85, [d85a, d85b], label="R3_MIXED_TRUST",
+                                 reverify_existing=True)
+        check("a later re-verify still names the damaged copy and adds no third file",
+              res85d2.ok
+              and any("mixed_unique.txt" in w and "damaged" in w for w in res85d2.warnings)
+              and not os.path.exists(os.path.join(d85a, "R3_MIXED_TRUST", "mixed_unique_3.txt")),
+              f"{res85d2.errors} {res85d2.warnings}")
+        # The wrap report's hash for the clip belongs to the numbered file,
+        # and the row says so (Sol r1, S2).
+        _doc85d, receipt85d = report.build_report(
+            res85d, att85d, SimpleNamespace(format_name="Generic"), {})
+        wrap85d, _ = report.build_wrap_report([receipt85d])
+        check("the wrap report says where a saved-beside file is",
+              "saved beside it as mixed_unique_2.txt" in wrap85d
+              and "saved beside it as mixed_unique_2.txt" in _doc85d)
         check("--reverify-existing trusts nothing",
               att85d["files_trusted_from_prior_generations"] == 0, str(att85d))
 
@@ -793,7 +821,7 @@ def flock(fd, operation):
                            for _, _, names in os.walk(dest) for name in names), 'staged temp at job unlock'
     return original_flock(fd, operation)
 def event(evt):
-    if fault == 'adjudication_sink' and evt['event'] == 'name_collision':
+    if fault == 'adjudication_sink' and evt['event'] == 'file_kept_both':
         fault_hits.append(fault)
         raise RuntimeError('injected adjudication sink failure')
 
@@ -1509,11 +1537,89 @@ def main():
     with open(os.path.join(src, "CLIPS/A001_C002.braw"), "wb") as f:
         f.write(os.urandom(2 * 1024 * 1024 + 777))  # same size, new content
     os.utime(os.path.join(src, "CLIPS/A001_C002.braw"), ns=(st.st_mtime_ns + 5_000_000_000,) * 2)
-    res3 = engine.offload(src, [d1, d2], label="CARD")
-    check("collision refused, job fails loudly",
-          not res3.ok and any("NAME COLLISION" in e for e in res3.errors))
+    # A reused name is not a reason to stop (Joshua 2026-11-09: copy safely,
+    # overwrite nothing, never refuse the dump). The earlier clip stays
+    # exactly as it was and the new one is saved beside it, verified.
+    new_hash = hasher.hash_file(os.path.join(src, "CLIPS/A001_C002.braw"), ["xxh64"])["xxh64"]
+    events7 = []
+    res3 = engine.offload(src, [d1, d2], label="CARD", event=events7.append)
+    check("a reused clip name does not fail the job",
+          res3.ok and res3.fully_verified and not res3.errors, str(res3.errors))
     after_hash = hasher.hash_file(os.path.join(d1, "CARD/CLIPS/A001_C002.braw"), ["xxh64"])["xxh64"]
     check("prior verified copy preserved bit-for-bit", after_hash == orig_hash)
+    fr7 = next(f for f in res3.files if f.rel_path == "CLIPS/A001_C002.braw")
+    for root in (d1, d2):
+        beside7 = os.path.join(root, "CARD/CLIPS/A001_C002_2.braw")
+        check(f"the new clip is saved beside it, bit for bit, at {os.path.basename(root)}",
+              os.path.isfile(beside7)
+              and hasher.hash_file(beside7, ["xxh64"])["xxh64"] == new_hash
+              and fr7.dest_status.get(os.path.join(root, "CARD")) == "verified"
+              and fr7.dest_rel(os.path.join(root, "CARD")) == "CLIPS/A001_C002_2.braw")
+    kept7 = [e for e in events7 if e.get("event") == "file_kept_both"]
+    check("one event says where the clip was saved, and nothing calls it a collision",
+          len(kept7) == 1 and kept7[0]["path"] == "CLIPS/A001_C002.braw"
+          and set(kept7[0]["saved_as"].values()) == {"CLIPS/A001_C002_2.braw"}
+          and not any(e.get("event") == "name_collision" for e in events7), str(kept7))
+    done7 = [e for e in events7 if e.get("event") == "file_done"]
+    check("the clip's done event says where it was saved; other files carry no such note",
+          [e.get("saved_as") for e in done7 if e["path"] == "CLIPS/A001_C002.braw"]
+          == [{os.path.join(root, "CARD"): "CLIPS/A001_C002_2.braw" for root in (d1, d2)}]
+          and not any("saved_as" in e for e in done7 if e["path"] != "CLIPS/A001_C002.braw"),
+          str([e for e in done7 if "saved_as" in e]))
+    code, out = run_verify(os.path.join(d1, "CARD"))
+    check("the folder still verifies, both clips included", code == 0 and "6/6" in out, out.strip())
+    # The same card again: the bytes saved beside the old clip are recognised,
+    # so nothing is copied a third time and no "_3" appears.
+    res3b = engine.offload(src, [d1, d2], label="CARD")
+    fr7b = next(f for f in res3b.files if f.rel_path == "CLIPS/A001_C002.braw")
+    check("a later run recognises the clip it saved beside the old one",
+          res3b.ok and set(fr7b.dest_status.values()) == {"skipped"}
+          and not os.path.exists(os.path.join(d1, "CARD/CLIPS/A001_C002_3.braw")),
+          f"{res3b.errors} {fr7b.dest_status}")
+    # The camera reuses the name once more: a third version takes the next number.
+    with open(os.path.join(src, "CLIPS/A001_C002.braw"), "wb") as f:
+        f.write(os.urandom(1024 * 1024 + 5))
+    res3c = engine.offload(src, [d1, d2], label="CARD")
+    check("a third version of the name takes the next number",
+          res3c.ok and os.path.isfile(os.path.join(d1, "CARD/CLIPS/A001_C002_3.braw"))
+          and hasher.hash_file(os.path.join(d1, "CARD/CLIPS/A001_C002.braw"), ["xxh64"])["xxh64"] == orig_hash
+          and hasher.hash_file(os.path.join(d1, "CARD/CLIPS/A001_C002_2.braw"), ["xxh64"])["xxh64"] == new_hash,
+          str(res3c.errors))
+    # The free-space preflight counts a file that will be saved beside
+    # another (Codex review of PR 18): different size at the name -> its
+    # bytes are needed; already saved beside, or same size -> none.
+    probe7 = engine.FileEntry("CLIPS/A001_C002.braw", 4321, 0)
+    card7 = os.path.join(d1, "CARD")
+    check("preflight counts a file that will be saved beside another",
+          engine._space_needed(card7, probe7) == 4321
+          and engine._space_needed(card7, engine.FileEntry("CLIPS/NEW.braw", 99, 0)) == 99)
+    check("preflight counts nothing for a file already there or already saved beside",
+          engine._space_needed(card7, engine.FileEntry(
+              "CLIPS/A001_C002.braw", os.path.getsize(os.path.join(card7, "CLIPS/A001_C002.braw")), 0)) == 0
+          and engine._space_needed(card7, engine.FileEntry(
+              "CLIPS/A001_C002.braw", 1024 * 1024 + 5, 0)) == 0)
+    # A name the card itself carries is never handed out: with a real
+    # "X_2.braw" on the card, a second "X.braw" goes to "X_3.braw".
+    src7, d7 = os.path.join(base, "SRC-BESIDE"), os.path.join(base, "D-BESIDE")
+    os.makedirs(d7)
+    make_card(src7, {"X.braw": 64 * 1024, "X_2.braw": 32 * 1024})
+    check("fixture card copies", engine.offload(src7, [d7], label="CARD").ok)
+    with open(os.path.join(src7, "X.braw"), "wb") as f:
+        f.write(os.urandom(48 * 1024))
+    res7d = engine.offload(src7, [d7], label="CARD")
+    check("a saved-beside name never lands on a name the card carries",
+          res7d.ok and os.path.isfile(os.path.join(d7, "CARD/X_3.braw"))
+          and os.path.getsize(os.path.join(d7, "CARD/X_2.braw")) == 32 * 1024,
+          str(res7d.errors))
+    # The preflight walks numbered names the way the copy does (Sol r3, S4):
+    # the card's own X_2.braw is not a saved copy of X.braw, whatever its
+    # size, and a saved X_3.braw past it is found.
+    card7d = os.path.join(d7, "CARD")
+    names7 = frozenset({"x.braw", "x_2.braw"})
+    check("preflight does not mistake the card's own numbered file for a saved copy",
+          engine._space_needed(card7d, engine.FileEntry("X.braw", 32 * 1024, 0), names7) == 32 * 1024)
+    check("preflight finds a saved copy past a name the card carries",
+          engine._space_needed(card7d, engine.FileEntry("X.braw", 48 * 1024, 0), names7) == 0)
 
     print("[8] fast mode is never 'fully verified'")
     d3 = os.path.join(base, "D3")
@@ -1535,8 +1641,14 @@ def main():
     fake_hash = hasher.hash_file(fake, ["xxh64"])["xxh64"]
     res5 = engine.offload(src, [d4], label="CARD", source_reread=False)
     fr = next(f for f in res5.files if f.rel_path == victim_rel)
+    # Adjudicated by content, never trusted on its metadata: the card's clip
+    # is copied and verified beside the twin instead of being skipped.
     check("metadata-twin without history is adjudicated, not trusted",
-          fr.dest_status.get(os.path.join(d4, "CARD")) == "conflict" and not res5.ok)
+          fr.dest_status.get(os.path.join(d4, "CARD")) == "verified" and res5.ok
+          and fr.dest_rel(os.path.join(d4, "CARD")) == "CLIPS/A001_C001_2.braw"
+          and hasher.hash_file(os.path.join(d4, "CARD/CLIPS/A001_C001_2.braw"), ["xxh64"])["xxh64"]
+          == hasher.hash_file(src_file, ["xxh64"])["xxh64"],
+          f"{fr.dest_status} {res5.errors}")
     check("metadata-twin preserved untouched",
           hasher.hash_file(fake, ["xxh64"])["xxh64"] == fake_hash)
 
@@ -1628,9 +1740,18 @@ def main():
         f.seek(500)
         f.write(b"\x00" * 16)
     os.utime(rot, ns=(st8.st_mtime_ns, st8.st_mtime_ns))
+    rot_hash = hasher.hash_file(rot, ["xxh64"])["xxh64"]
     res11 = engine.offload(src, [d8], label="CARD", source_reread=False)
+    good11 = os.path.join(d8, "CARD/CLIPS/A001_C001_2.braw")
     check("post-fast corruption is caught, never inherited as trusted",
-          not res11.ok and res11.attestation()["files_trusted_from_prior_generations"] == 0)
+          res11.attestation()["files_trusted_from_prior_generations"] == 0
+          and any("A001_C001.braw" in w and "damaged" in w for w in res11.warnings),
+          str(res11.warnings))
+    check("the card's good clip is saved beside the damaged one, which is left as found",
+          res11.ok and os.path.isfile(good11)
+          and hasher.hash_file(good11, ["xxh64"])["xxh64"]
+          == hasher.hash_file(os.path.join(src, "CLIPS/A001_C001.braw"), ["xxh64"])["xxh64"]
+          and hasher.hash_file(rot, ["xxh64"])["xxh64"] == rot_hash, str(res11.errors))
 
     print("[16] unreadable source file fails cleanly (writer-sentinel deadlock regression)")
     locked = os.path.join(src, "CLIPS/LOCKED.braw")
@@ -3614,18 +3735,32 @@ except OSError:
         check(f"a label another card owns is refused {flag_desc}",
               p82c.returncode != 0 and "refused_label_collision" in kinds82c
               and os.listdir(os.path.join(d82a, "OWNED82")) == ["old.mov"], str(kinds82c))
-    # At D82B the owner has no footage. Loose files still may not take a
-    # real card's name (the card, re-inserted, would land on top of them),
-    # but a card may: the name passes to it and both records keep the name
-    # (Joshua 2026-09-21: a blank card folder must not block a real card).
+    # Where the owner has no footage the name is free, for picked files as
+    # much as for a card (Joshua 2026-11-09: files picked off B001 and C001
+    # were refused into an empty destination because cards on record had
+    # carried those names). The registry stays untouched: picks own nothing.
+    d82c = os.path.join(base, "D82C")
+    os.makedirs(d82c)
     p82d = subprocess.run(
-        [sys.executable, "-m", "dumptruck.cli", "offload", src82, d82b,
+        [sys.executable, "-m", "dumptruck.cli", "offload", src82, d82c,
          "--label", "OWNED82", "--json", "--no-report", "--loose-files"],
         capture_output=True, text=True, cwd=HERE, env=env82)
-    kinds82d = [json.loads(line).get("event") for line in p82d.stdout.splitlines() if line.strip()]
-    check("loose files never take a remembered card name, even with nothing at the destination",
-          p82d.returncode != 0 and "refused_label_collision" in kinds82d
-          and not os.path.exists(os.path.join(d82b, "OWNED82")), str(kinds82d))
+    events82d = [json.loads(line) for line in p82d.stdout.splitlines() if line.strip()]
+    kinds82d = [e.get("event") for e in events82d]
+    check("picked files take a remembered card name where that card has no footage",
+          p82d.returncode == 0 and "refused_label_collision" not in kinds82d
+          and (events82d[-1] if events82d else {}).get("fully_verified") is True
+          and os.path.isfile(os.path.join(d82c, "OWNED82", "clip one.mov")),
+          (p82d.stdout + p82d.stderr)[-600:])
+    check("taking the name is silent: no warning about the other card",
+          not any("card name" in e.get("message", "") for e in events82d
+                  if e.get("event") == "source_warning"), str(kinds82d))
+    with open(os.path.join(home82, "datasets.json")) as f:
+        check("picked files under a card's name still leave the registry untouched",
+              [r["id"] for r in json.load(f)["datasets"]] == ["owner-82"])
+    # At D82B the owner has no footage either. A card takes the name: it
+    # passes to the card and both records keep it (Joshua 2026-09-21: a
+    # blank card folder must not block a real card).
     p82e = subprocess.run(
         [sys.executable, "-m", "dumptruck.cli", "offload", src82, d82b,
          "--label", "OWNED82", "--json", "--no-report"],

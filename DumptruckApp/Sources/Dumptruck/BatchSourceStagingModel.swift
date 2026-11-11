@@ -29,9 +29,9 @@ final class BatchSourceCandidate: ObservableObject, Identifiable {
     @Published var inspection: CardInspection?
     @Published var customLabel: String
     @Published var projectedLanes: [String] = []
-    /// Set when the batch picked a different name than the engine
-    /// suggested, and says why ("Renamed from "NO NAME": …"), so the DIT
-    /// sees the rename before Start (Joshua, 2026-09-28).
+    /// Set when the card copies under a numbered name, and says why
+    /// ("Copying to "NO NAME_2": …"), so the DIT sees it before Start
+    /// (Joshua, 2026-09-28).
     @Published var renameNote: String?
     var identityPin: FileIdentityPin?
     /// The name the batch last wrote into the field itself. While the field
@@ -52,6 +52,20 @@ final class BatchSourceCandidate: ObservableObject, Identifiable {
         customLabel = label
     }
 
+    /// The numbered name a typed name was given because it was taken
+    /// ("CAM_B_2" for "CAM_B"), and the field text it was given for. The
+    /// field keeps what the operator typed, which stays the base for the
+    /// next check, so "CAM_B" never grows into "CAM_B_2_2". Any edit to the
+    /// field makes it stale (Joshua, 2026-11-09: number a taken name, never
+    /// refuse it).
+    private var assignedLabel: (label: String, forText: String)?
+
+    /// Record the name the batch gave a typed name, or nil when the card
+    /// copies under the typed name itself.
+    func assignNumberedLabel(_ label: String?) {
+        assignedLabel = label.map { ($0, customLabel) }
+    }
+
     init(path: String, originalPath: String? = nil, assignmentID: UUID = UUID()) {
         self.id = UUID()
         self.originalPath = originalPath ?? path
@@ -66,11 +80,18 @@ final class BatchSourceCandidate: ObservableObject, Identifiable {
     /// is what the operator sees, so a field they cleared is an empty label
     /// and gets the empty-label error, never a silent fallback (Codex
     /// desktop QA round 2, 2026-09-15, R2-02).
-    var effectiveLabel: String {
+    var typedLabel: String {
         let edited = customLabel.trimmingCharacters(in: .whitespacesAndNewlines)
         if inspection != nil { return edited }
         if !edited.isEmpty { return edited }
         return ""
+    }
+
+    /// The name the card is queued under and its folder carries: the
+    /// field's text, or the numbered name the batch gave it.
+    var effectiveLabel: String {
+        if let assignedLabel, assignedLabel.forText == customLabel { return assignedLabel.label }
+        return typedLabel
     }
 
     var statusText: String {
@@ -130,7 +151,8 @@ private struct LooseAwareBatchInspector: BatchSourceInspector {
                 totalBytes: result.metadata.totalBytes,
                 fileCount: result.metadata.fileCount,
                 customProperties: properties,
-                previousDestinations: []))
+                previousDestinations: [],
+                datasetID: nil))
     }
 }
 
@@ -142,6 +164,9 @@ final class BatchSourceStagingModel: ObservableObject {
     @Published var candidates: [BatchSourceCandidate] = []
     @Published var isInspecting = false
     @Published var generalError: String?
+    /// The engine's card record, read once per revalidation pass. Checks
+    /// replace it so they never read the real one.
+    var cardRegistry: () -> [CardFolderClaims.Record] = { CardFolderClaims.loadRegistry() }
 
     private var inspectionTask: Task<Void, Never>?
     private var generation = UUID()
@@ -234,10 +259,10 @@ final class BatchSourceStagingModel: ObservableObject {
     /// Card names are settled here, per card, every time. A shared or taken
     /// name used to refuse the whole pile from the preflight, and a label
     /// edit never re-ran that check, so the operator could not rename their
-    /// way out (Joshua, 2026-09-28). Now an automatic name is numbered past
-    /// the clash, and a clash on a name someone typed (or a known card's
-    /// continuation key) refuses only the cards involved and clears on the
-    /// next edit, because every edit comes back through here.
+    /// way out (Joshua, 2026-09-28). Now every taken name is numbered past
+    /// the clash, typed names and known cards' names included: a naming
+    /// question never stops a copy (Joshua, 2026-11-09). A typed name keeps
+    /// its text in the field and copies under the numbered name.
     func revalidateAll(appModel: AppModel) {
         guard !isInspecting else { return }
         var firstError: String?
@@ -277,7 +302,7 @@ final class BatchSourceStagingModel: ObservableObject {
             let automatic = candidate.labelIsAutomatic
             let label = automatic
                 ? inspection.suggestedLabel.trimmingCharacters(in: .whitespacesAndNewlines)
-                : candidate.effectiveLabel
+                : candidate.typedLabel
             if let reason = validateLabel(label) {
                 candidate.status = .refused(reason)
                 candidate.renameNote = nil
@@ -290,6 +315,9 @@ final class BatchSourceStagingModel: ObservableObject {
                 label: label, fixed: !automatic || inspection.known))
         }
 
+        // Stale until this pass gives the card a name again.
+        candidates.forEach { $0.assignNumberedLabel(nil) }
+        let registry = cardRegistry()
         var allocator = BatchLabelAllocator(entries: entries)
         while let request = allocator.nextRequest() {
             let candidate = named[request.index]
@@ -307,16 +335,20 @@ final class BatchSourceStagingModel: ObservableObject {
             }
             var probes: [BatchLabelAllocator.LaneProbe] = []
             var rootInvalid = false
+            // Picked files have no card record, so nothing on record is theirs.
+            let datasetID = LooseSourceStaging.isStagedSet(candidate.path)
+                ? nil : candidate.inspection?.datasetID
             for root in roots {
                 guard let lane = projectedLane(root: root, label: request.label,
                                                candidate: candidate, appModel: appModel) else {
                     rootInvalid = true
                     break
                 }
-                // An existing folder is only fine when this same card wrote
-                // it: a known card continuing, as single-card Start allows.
-                let foreign = FileManager.default.fileExists(atPath: lane)
-                    && !laneBelongsToCard(lane, candidate: candidate)
+                // The engine's rule, the one single-card Start uses: a
+                // folder is taken only when it holds files another card
+                // on record wrote (or, unclaimed, carries its name).
+                let foreign = CardFolderClaims.isTaken(
+                    lane: lane, label: request.label, datasetID: datasetID, registry: registry)
                 probes.append(BatchLabelAllocator.LaneProbe(path: lane, foreign: foreign))
             }
             allocator.answer(rootInvalid
@@ -329,11 +361,13 @@ final class BatchSourceStagingModel: ObservableObject {
             case let .assigned(label, lanes, renamedFrom, reason)?:
                 if candidate.labelIsAutomatic {
                     if candidate.customLabel != label { candidate.seedAutomaticLabel(label) }
-                    candidate.renameNote = renamedFrom.map {
-                        BatchLabelAllocator.renameNote(from: $0, reason: reason)
-                    }
                 } else {
-                    candidate.renameNote = nil
+                    // The field keeps the typed text; the card copies under
+                    // the numbered name.
+                    candidate.assignNumberedLabel(label == candidate.typedLabel ? nil : label)
+                }
+                candidate.renameNote = renamedFrom.map {
+                    BatchLabelAllocator.renameNote(from: $0, to: label, reason: reason)
                 }
                 candidate.projectedLanes = lanes
                 candidate.status = .ready
@@ -351,16 +385,6 @@ final class BatchSourceStagingModel: ObservableObject {
         }
         generalError = firstError
         objectWillChange.send()
-    }
-
-    /// True when this card wrote `lane` on an earlier offload (engine
-    /// registry), which makes writing there again a continuation.
-    private func laneBelongsToCard(_ lane: String, candidate: BatchSourceCandidate) -> Bool {
-        guard let inspection = candidate.inspection else { return false }
-        return BatchCardNaming.laneBelongsToCard(
-            lane, known: inspection.known,
-            previousDestinations: inspection.previousDestinations,
-            resolve: { ($0 as NSString).resolvingSymlinksInPath })
     }
 
     func updateLabel(id: UUID, newLabel: String, appModel: AppModel) {
@@ -609,6 +633,7 @@ final class BatchSourceStagingModel: ObservableObject {
                 reelName: item.metadata.customProperties["reel_name"] ?? "",
                 suggestedLabel: item.suggestedLabel,
                 known: item.metadata.isKnownCard,
+                datasetID: item.metadata.datasetID,
                 mounts: Int(item.metadata.customProperties["mounts"] ?? "0") ?? 0,
                 files: item.metadata.fileCount,
                 bytes: item.metadata.totalBytes,
