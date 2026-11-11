@@ -220,6 +220,33 @@ enum SetupFlowCheck {
                     "a blocked batch Start explains itself")
         }
         require(model.jobs.isEmpty, "a blocked batch Start creates no job")
+
+        // 10. The first card dragged over stays on the bench after it joins
+        //     the batch. Start Offload still starts the batch, not that one
+        //     card (Joshua, 2026-11-10).
+        require(model.assign(card, as: .source), "stage the first card on the bench")
+        require(model.sourcePath == card, "the first card is on the bench")
+        require(model.startRunsBatch, "a card on the bench that is in the batch starts the batch")
+        require(!model.stagedCardStartsBesideBatch, "a batch card is not started a second time")
+        if model.engineConfigurationError == nil {
+            require(model.toolbarStartBlockedReason == AppModel.noDestinationReason,
+                    "Start answers for the batch, got "
+                    + String(describing: model.toolbarStartBlockedReason))
+        }
+        model.clearSource()
+        model.batchStagingModel.candidates = [BatchSourceCandidate(path: card),
+                                              BatchSourceCandidate(path: card2)]
+
+        // 11. A card that is already copying leaves the batch instead of
+        //     being queued again and failing.
+        let copying = Job(label: "A001", sourcePath: card, destinations: [],
+                          sourceAssignmentID: UUID())
+        copying.phase = .queued
+        model.jobs = [copying]
+        model.batchStagingModel.dropCandidatesAlreadyCopying(appModel: model)
+        require(model.batchStagingModel.candidates.map(\.path) == [card2],
+                "the copying card left the batch and the other stayed")
+        model.jobs = []
         model.batchStagingModel.cancelStaging()
         model.lastSetupError = nil
         require(!model.startRunsBatch, "an empty batch leaves Start on the single card")

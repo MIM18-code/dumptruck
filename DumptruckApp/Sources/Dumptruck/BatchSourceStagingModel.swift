@@ -241,6 +241,24 @@ final class BatchSourceStagingModel: ObservableObject {
         }
     }
 
+    /// Cards that already have a queued or running job leave the batch.
+    /// Queueing one again made a second job for the same folder, which the
+    /// engine refused and the job list showed as FAILED (Joshua, 2026-11-10).
+    func dropCandidatesAlreadyCopying(appModel: AppModel) {
+        let active = Set(appModel.jobs.filter(\.isRunning).map(\.sourcePath))
+        let copying = candidates.filter { active.contains($0.path) }
+        guard !copying.isEmpty else { return }
+        // Removed in place: the other cards keep the preflight they passed,
+        // so the same click can still start them.
+        candidates.removeAll { active.contains($0.path) }
+        if candidates.isEmpty {
+            inspectionTask?.cancel()
+            inspectionTask = nil
+            isInspecting = false
+        }
+        objectWillChange.send()
+    }
+
     func cancelStaging() {
         inspectionTask?.cancel()
         inspectionTask = nil
@@ -535,6 +553,9 @@ final class BatchSourceStagingModel: ObservableObject {
         labelRevalidation?.cancel()
         labelRevalidation = nil
         generalError = nil
+        dropCandidatesAlreadyCopying(appModel: appModel)
+        // Every card was already copying: nothing left to start.
+        if candidates.isEmpty { return .success([]) }
         guard canQueueBatch else {
             let error = BatchQueueError.notReady
             generalError = error.description

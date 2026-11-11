@@ -97,6 +97,10 @@ struct HelpGuideView: View {
                     """)
 
                     section("Batch sources", """
+                    Drag several cards onto the left rail and Start Offload \
+                    copies all of them. Review Batch is there if you want to \
+                    check or change the names first.
+
                     "Batch Sources…" at the bottom of the left rail queues \
                     several cards or folders in one pass. Pick the folders, \
                     review the staged list, and Dumptruck runs one job per card \

@@ -190,14 +190,14 @@ private struct BatchRailSection: View {
             Button {
                 model.openBatchWindow()
             } label: {
-                Label(staging.canQueueBatch ? "Review & Start Batch…" : "Review Batch…",
+                Label("Review Batch…",
                       systemImage: "square.stack.3d.up")
                     .font(.caption.weight(.medium))
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .help("Open Batch Sources to check labels and start one job per card")
+            .help("Check or change the card names. Start Offload copies every card either way")
         }
         .padding(8)
         .background(.background.secondary, in: .rect(cornerRadius: 8))

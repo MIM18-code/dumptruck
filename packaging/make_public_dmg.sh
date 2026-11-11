@@ -98,6 +98,7 @@ for helper in r3d-probe braw-probe arri-probe; do
 done
 sign_code "$APP"
 codesign --verify --deep --strict "$APP"
+notarize_app "$APP"
 mkdir -p packaging/dist
 ln -s /Applications "$STAGE/Applications"
 DMG="$REPO/packaging/dist/Dumptruck-$VERSION-arm64-$LABEL-$(date +%Y%m%d-%H%M%S).dmg"

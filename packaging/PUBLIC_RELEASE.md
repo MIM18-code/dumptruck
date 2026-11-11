@@ -36,8 +36,10 @@ inside `Contents/Resources/engine/legal/`.
 
 Signing uses `packaging/release_signing.sh`. With a "Developer ID
 Application" identity in the keychain, every executable gets the hardened
-runtime and a secure timestamp, and the DMG is notarized and stapled through
-the notarytool keychain profile `dumptruck-notary` (override with
+runtime and a secure timestamp. The app is notarized and stapled first, then
+the DMG that holds it, so a copy that Homebrew or a drag takes out of the DMG
+still opens without asking Apple's servers. Both go through the notarytool
+keychain profile `dumptruck-notary` (override with
 `DUMPTRUCK_NOTARY_PROFILE`). Create that profile once:
 
 ```sh

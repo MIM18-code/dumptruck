@@ -70,12 +70,71 @@ sign_if_no_vendor_signature() {
     fi
 }
 
+# Sets NOTARY_PROFILE to the first notarytool keychain profile that answers.
+pick_notary_profile() {
+    local candidate
+    NOTARY_PROFILE="${DUMPTRUCK_NOTARY_PROFILE:-}"
+    [ -z "$NOTARY_PROFILE" ] || return 0
+    for candidate in dumptruck-notary backlot-notary; do
+        if xcrun notarytool history --keychain-profile "$candidate" >/dev/null 2>&1; then
+            NOTARY_PROFILE="$candidate"
+            return 0
+        fi
+    done
+    echo "No notarytool profile found (tried dumptruck-notary, backlot-notary)" >&2
+    return 1
+}
+
+# Submit one file and wait. Prints the submission id; fails with Apple's log
+# unless the answer is Accepted.
+notary_submit() {
+    local file="$1" result status submission
+    result="$(xcrun notarytool submit "$file" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json)" \
+        || { echo "notarytool submit failed; check the '$NOTARY_PROFILE' keychain profile" >&2; return 1; }
+    status="$(/usr/bin/plutil -extract status raw -o - - <<< "$result")"
+    submission="$(/usr/bin/plutil -extract id raw -o - - <<< "$result")"
+    if [ "$status" != "Accepted" ]; then
+        echo "Notarization $status (submission $submission). Apple's log:" >&2
+        xcrun notarytool log "$submission" --keychain-profile "$NOTARY_PROFILE" >&2 || true
+        return 1
+    fi
+    printf '%s\n' "$submission"
+}
+
+# Notarize the signed app and staple the ticket to the app itself, before
+# the DMG is made. Homebrew copies the app out of the DMG and a person drags
+# it out, so the DMG's own ticket stays behind. Without one on the app, the
+# first launch needs Apple's servers, and when that lookup fails macOS says
+# it cannot check the app for malware (Joshua, 2026-11-10, a Homebrew
+# install of 0.5.19). Skips on the same terms as notarize_dmg.
+notarize_app() {
+    local app="$1" archive submission
+    if [ "$DEVELOPER_ID" != "1" ]; then
+        echo "App not notarized: no Developer ID Application identity in the keychain."
+        return 0
+    fi
+    if [ "${DUMPTRUCK_NOTARIZE:-1}" != "1" ]; then
+        echo "App not notarized: DUMPTRUCK_NOTARIZE=${DUMPTRUCK_NOTARIZE:-}."
+        return 0
+    fi
+    pick_notary_profile || return 1
+    archive="$(mktemp -d -t dumptruck-notary)/Dumptruck.zip"
+    /usr/bin/ditto -c -k --keepParent "$app" "$archive"
+    echo "== notarizing the app with profile $NOTARY_PROFILE (usually a few minutes)"
+    submission="$(notary_submit "$archive")" || { rm -rf "$(dirname "$archive")"; return 1; }
+    rm -rf "$(dirname "$archive")"
+    xcrun stapler staple "$app"
+    xcrun stapler validate "$app"
+    codesign --verify --deep --strict "$app"
+    printf 'App notarized and stapled (submission %s)\n' "$submission"
+}
+
 # Sign the DMG, submit it, staple the ticket, and check Gatekeeper accepts
-# it. Stapling the DMG lets a first launch pass Gatekeeper offline, which
-# matters on set. Skips with a notice when the build is not Developer ID
-# signed or DUMPTRUCK_NOTARIZE=0.
+# it. The DMG's ticket covers opening the DMG; the app inside carries its
+# own from notarize_app. Skips with a notice when the build is not Developer
+# ID signed or DUMPTRUCK_NOTARIZE=0.
 notarize_dmg() {
-    local dmg="$1" profile="${DUMPTRUCK_NOTARY_PROFILE:-}" result status submission candidate
+    local dmg="$1" submission
     if [ "$DEVELOPER_ID" != "1" ]; then
         echo "Not notarized: no Developer ID Application identity in the keychain."
         return 0
@@ -85,25 +144,9 @@ notarize_dmg() {
         echo "Not notarized: DUMPTRUCK_NOTARIZE=${DUMPTRUCK_NOTARIZE:-}."
         return 0
     fi
-    if [ -z "$profile" ]; then
-        for candidate in dumptruck-notary backlot-notary; do
-            if xcrun notarytool history --keychain-profile "$candidate" >/dev/null 2>&1; then
-                profile="$candidate"
-                break
-            fi
-        done
-        [ -n "$profile" ] || { echo "No notarytool profile found (tried dumptruck-notary, backlot-notary)" >&2; return 1; }
-    fi
-    echo "== notarizing with profile $profile (usually a few minutes)"
-    result="$(xcrun notarytool submit "$dmg" --keychain-profile "$profile" --wait --output-format json)" \
-        || { echo "notarytool submit failed; check the '$profile' keychain profile" >&2; return 1; }
-    status="$(/usr/bin/plutil -extract status raw -o - - <<< "$result")"
-    submission="$(/usr/bin/plutil -extract id raw -o - - <<< "$result")"
-    if [ "$status" != "Accepted" ]; then
-        echo "Notarization $status (submission $submission). Apple's log:" >&2
-        xcrun notarytool log "$submission" --keychain-profile "$profile" >&2 || true
-        return 1
-    fi
+    pick_notary_profile || return 1
+    echo "== notarizing the DMG with profile $NOTARY_PROFILE (usually a few minutes)"
+    submission="$(notary_submit "$dmg")" || return 1
     xcrun stapler staple "$dmg"
     xcrun stapler validate "$dmg"
     spctl --assess --type open --context context:primary-signature -v "$dmg"

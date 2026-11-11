@@ -1329,7 +1329,7 @@ final class AppModel: ObservableObject {
             relativePath: proposal.relativePath,
             label: label,
             organizationRender: proposal.organizationRender)
-        startOrExplain()
+        startStagedCardOrExplain()
         // The freeze must not outlive this click: a successful start consumed
         // it synchronously above, and on ANY blocked or failed outcome it is
         // disarmed here — so no later manual Start can consume a render the
@@ -2370,16 +2370,28 @@ final class AppModel: ObservableObject {
         return engineConfigurationError
     }
 
-    /// With no single card staged but cards in the batch, Start Offload
-    /// starts the batch. It used to answer "Pick a source disk or folder
-    /// first" over three Ready cards (Joshua, 2026-10-12).
+    /// With cards in the batch, Start Offload starts the batch. It used to
+    /// answer "Pick a source disk or folder first" over three Ready cards
+    /// (Joshua, 2026-10-12), and then to copy only the first card dragged
+    /// over: that card stays on the bench after it joins the batch, and
+    /// the bench won over the batch (Joshua, 2026-11-10).
     var startRunsBatch: Bool {
-        sourcePath == nil && !batchStagingModel.candidates.isEmpty
+        !batchStagingModel.candidates.isEmpty
+    }
+
+    /// A card on the bench that is not in the batch and has not run yet.
+    /// Start Offload starts it along with the batch.
+    var stagedCardStartsBesideBatch: Bool {
+        guard startRunsBatch, let src = sourcePath else { return false }
+        return !stagedSourceAlreadyRan
+            && !batchStagingModel.candidates.contains { $0.path == src }
     }
 
     /// What the toolbar's Start Offload would refuse with right now.
     var toolbarStartBlockedReason: String? {
-        startRunsBatch ? batchStartBlockedReason : startBlockedReason
+        guard startRunsBatch else { return startBlockedReason }
+        if stagedCardStartsBesideBatch, startBlockedReason == nil { return nil }
+        return batchStartBlockedReason
     }
 
     var batchStartBlockedReason: String? {
@@ -2791,9 +2803,39 @@ final class AppModel: ObservableObject {
     /// jobs), so the button stays clickable and EXPLAINS itself when blocked.
     func startOrExplain() {
         if startRunsBatch {
+            // Everything staged starts on one click: the card on the bench
+            // when it is its own card, then the batch.
+            // A name typed on the bench for a card that joined the batch
+            // is the name it copies under.
+            let typed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+            if labelEditedByUser, !typed.isEmpty, let src = sourcePath,
+               let candidate = batchStagingModel.candidates.first(where: { $0.path == src }),
+               candidate.customLabel != typed {
+                batchStagingModel.updateLabel(id: candidate.id, newLabel: typed, appModel: self)
+            }
+            // What kept the bench card back must outlive the batch's own
+            // success, which clears the explanation.
+            var benchProblem: String?
+            if stagedCardStartsBesideBatch {
+                if let reason = startBlockedReason {
+                    benchProblem = reason
+                } else {
+                    start()
+                    benchProblem = lastSetupError
+                }
+            }
             startBatchOrExplain()
+            if let benchProblem, lastSetupError == nil {
+                lastSetupError = benchProblem
+                startGateExplanation = benchProblem
+            }
             return
         }
+        startStagedCardOrExplain()
+    }
+
+    /// Start for the card on the bench alone.
+    func startStagedCardOrExplain() {
         if let reason = startBlockedReason {
             // A card read in progress settles by itself in seconds; pressing
             // Start a moment early must not throw away a staged retry.
@@ -2931,6 +2973,9 @@ final class AppModel: ObservableObject {
         }
         updateSleepAssertion()
         updateDockTile()
+        // The card is copying now, so it leaves the batch: starting the
+        // batch later would send it again and fail that second job.
+        batchStagingModel.dropCandidatesAlreadyCopying(appModel: self)
         if mustQueue {
             queuedParams[job.id] = plan
             _ = persistJournal()

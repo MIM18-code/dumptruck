@@ -26,6 +26,9 @@ try:
  subprocess.run(['codesign','--verify','--deep','--strict',str(app)],check=True)
  if release:
   subprocess.run(['spctl','--assess','--type','execute',str(app)],check=True)
+  # The app carries its own ticket: Homebrew and a drag to Applications
+  # both leave the DMG's ticket behind.
+  subprocess.run(['xcrun','stapler','validate',str(app)],check=True,stdout=subprocess.DEVNULL)
   ours=[app,engine/'python/bin/python3.13',bin/'ffmpeg',bin/'ffprobe']+[p for p in (engine/'tools').glob('*-probe')]
   for path in ours:
    info=signature(path)
