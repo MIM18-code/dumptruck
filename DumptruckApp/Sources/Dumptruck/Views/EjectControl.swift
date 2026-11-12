@@ -126,7 +126,7 @@ struct ForceEjectSheet: View {
     private func infoLine(_ hold: AppModel.EjectHold?, job: Job) -> String {
         let state: String
         if job.isRunning {
-            state = job.phase.rawValue
+            state = job.activityText
         } else if case .verdictNotCurrent = hold {
             // Its SAFE line is history here, not the card's current state.
             state = "marked \(job.verdict.displayLine) earlier, no longer current"

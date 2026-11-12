@@ -283,6 +283,49 @@ final class Job: ObservableObject, Identifiable {
             if phase != oldValue { resetEscalators() }
         }
     }
+
+    /// The operator paused this transfer: its engine process is suspended,
+    /// so nothing is read or written until Resume. The job is still in
+    /// flight. Its phase, its files and its hold on the card and drives are
+    /// all unchanged, which is why this is a flag and not a phase.
+    @Published private(set) var isPaused = false
+    private var pausedAt: Date?
+
+    /// What the card says it is doing right now.
+    var activityText: String { isPaused ? "Paused" : phase.rawValue }
+
+    func markPaused(at now: Date = Date()) {
+        guard !isPaused else { return }
+        isPaused = true
+        pausedAt = now
+        // A pause is not a stall and not a slowdown.
+        currentSpeed = 0
+        stallCarry = 0
+        if stallSeconds != 0 { stallSeconds = 0 }
+        if verifyingCopies { verifyingCopies = false }
+        clearThrottle()
+    }
+
+    /// Paused time is not transfer time. The rate anchors move forward by
+    /// the length of the pause, so the ETA and the average speed pick up
+    /// where they left off instead of counting the wait as a slow stretch.
+    func markResumed(at now: Date = Date()) {
+        guard isPaused else { return }
+        isPaused = false
+        let began = pausedAt ?? now
+        pausedAt = nil
+        let gap = max(0, now.timeIntervalSince(began))
+        if let start = phaseStartTime {
+            // A phase that began from a buffered event during the pause
+            // starts its clock now.
+            phaseStartTime = start <= began ? start.addingTimeInterval(gap) : now
+        }
+        if speedBaselineTime != nil {
+            speedBaselineTime = now
+            speedBaselineBytes = speedCounterBytes
+        }
+        lastPipelineActivity = nil
+    }
     var currentFile = ""
     var bytesTotal: Int64 = 0
     var bytesFinished: Int64 = 0   // completed + skipped files
@@ -509,6 +552,8 @@ final class Job: ObservableObject, Identifiable {
     }
 
     func sampleThroughput(at now: Date = Date()) {
+        // A suspended engine moves no bytes by design: no sample, no stall.
+        guard !isPaused else { return }
         guard let baselineTime = speedBaselineTime else { return }
         let dt = now.timeIntervalSince(baselineTime)
         guard dt >= 0.5 else { return }
@@ -1003,7 +1048,8 @@ final class Job: ObservableObject, Identifiable {
 
     func byteRate(at now: Date) -> Double? {
         guard let start = phaseStartTime else { return nil }
-        let elapsed = now.timeIntervalSince(start)
+        // While paused the clock stands where the pause began.
+        let elapsed = (pausedAt ?? now).timeIntervalSince(start)
         guard elapsed >= 3 else { return nil }
         let delta = speedCounterBytes - phaseStartBytes
         guard delta > 0 else { return nil }
@@ -1020,7 +1066,7 @@ final class Job: ObservableObject, Identifiable {
     /// (desktop QA round 3, R3-03).
     func fileRate(at now: Date) -> Double? {
         guard let start = phaseStartTime else { return nil }
-        let elapsed = now.timeIntervalSince(start)
+        let elapsed = (pausedAt ?? now).timeIntervalSince(start)
         guard elapsed >= 3 else { return nil }
         let delta = filesFinished - phaseStartFiles
         guard delta > 0 else { return nil }

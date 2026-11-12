@@ -187,11 +187,55 @@ def identity_tests(base):
     check("renamed label remembered on re-insert", code == 0 and "'GOPRO_ROOF'" in out, out[:300])
 
 
+def pulled_card_tests(base):
+    """A card pulled mid-copy is still itself when it comes back: its retry
+    goes into the folder it half-filled (soak pass, 2026-11-12)."""
+    print("\n== a card pulled mid-copy ==")
+    env = {"DUMPTRUCK_HOME": os.path.join(base, "home-pulled")}
+    src = os.path.join(base, "PULLED_CARD")
+    dest = os.path.join(base, "PULLED_DEST")
+    os.makedirs(dest)
+    for i in range(3):
+        touch(src, f"DCIM/100MEDIA/C000{i}.MP4", 4096)
+    # What the engine's bookkeeping does at the end of a failed job, with the
+    # card gone by then and back afterwards. "gone" is the path missing (an
+    # unplugged /Volumes card); "empty" is the path left behind as an empty
+    # folder (a mount point), which used to record empty anchors.
+    snippet = (
+        "import os, shutil, sys, types\n"
+        "from dumptruck import cards, identity\n"
+        "src, dest, label, how = sys.argv[1:5]\n"
+        "known, vol, start, _ = identity.identify(src)\n"
+        "card = cards.detect(src)\n"
+        "shutil.move(src, src + '.pulled')\n"
+        "if how == 'empty': os.mkdir(src)\n"
+        "result = types.SimpleNamespace(destinations=[dest], files=[], fully_verified=False)\n"
+        "rec = identity.record_offload(src, label, card, result, known_id=known['id'] if known else None, vol=vol, fallback_anchors=start)\n"
+        "if how == 'empty': os.rmdir(src)\n"
+        "shutil.move(src + '.pulled', src)\n"
+        "again = identity.identify(src)[0]\n"
+        "print('anchors', len(rec['anchors']), 'KNOWN' if again and again['id'] == rec['id'] else 'STRANGER')\n")
+    for how in ("empty", "gone"):
+        r = subprocess.run([sys.executable, "-c", snippet, src, dest, "PULLED", how],
+                           capture_output=True, text=True, cwd=HERE, env={**os.environ, **env})
+        out = r.stdout + r.stderr
+        check(f"a card that was unreadable at bookkeeping ({how}) keeps the anchors it started with",
+              r.returncode == 0 and "anchors 3 KNOWN" in out, out[-300:])
+    # The half-filled folder is its own: the retry is not refused.
+    touch(dest, "PULLED/DCIM/100MEDIA/C0000.MP4", 4096)
+    code, out = cli(env, "offload", src, dest, "--label", "PULLED")
+    check("its retry goes into the folder it half-filled, not refused as another card's",
+          code == 0 and "REFUSED" not in out and "Continuing into existing card folder" in out, out[:400])
+    check("the retry finished the card", all(
+        os.path.isfile(os.path.join(dest, "PULLED/DCIM/100MEDIA", f"C000{i}.MP4")) for i in range(3)))
+
+
 def main():
     base = os.path.realpath(tempfile.mkdtemp(prefix="dumptruck-cards-"))
     print(f"arena: {base}\n")
     detection_tests(base)
     identity_tests(base)
+    pulled_card_tests(base)
     print(f"\n{'='*50}\n{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
         print("FAILED:", *FAIL, sep="\n  - ")

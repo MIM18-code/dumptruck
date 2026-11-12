@@ -50,6 +50,179 @@ def run_verify(card_root):
 
 
 
+def scenario_refused_drive_left_as_found(base):
+    """[101] Issue #31. A drive refused for lack of space used to keep the
+    card folder, the card's empty folder tree and the job lock."""
+    print("[101] a destination refused before writing is left as it was found")
+    import types
+    src = os.path.join(base, "CARD101")
+    make_card(src, {"DCIM/100MEDIA/a.mov": 4096, "DCIM/100MEDIA/b.mov": 4096,
+                    "PRIVATE/M4ROOT/CLIP/c.mxf": 4096})
+    os.makedirs(os.path.join(src, "DCIM/EMPTY"))
+    real_statvfs = engine.os.statvfs
+
+    def refused_for_space(dests, on_stat=None):
+        def _full(path):
+            if on_stat:
+                on_stat(path)
+            return types.SimpleNamespace(f_bavail=0, f_frsize=4096)
+        engine.os.statvfs = _full
+        try:
+            engine.offload(src, dests, label="CARD101", source_reread=False)
+            return False
+        except RuntimeError as e:
+            return "not enough space" in str(e)
+        finally:
+            engine.os.statvfs = real_statvfs
+
+    def tree(root):
+        out = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            rel = os.path.relpath(dirpath, root)
+            out += [os.path.normpath(os.path.join(rel, n)) for n in dirnames + filenames]
+        return sorted(out)
+
+    fresh_a = os.path.join(base, "D101A")
+    fresh_b = os.path.join(base, "D101B")
+    os.makedirs(fresh_a)
+    os.makedirs(fresh_b)
+    check("the too-small drive is refused", refused_for_space([fresh_a, fresh_b]))
+    check("a refused drive keeps no card folder, folder tree or lock file",
+          tree(fresh_a) == [] and tree(fresh_b) == [],
+          f"{tree(fresh_a)} {tree(fresh_b)}")
+
+    # A folder that was there before the job belongs to whoever made it.
+    kept = os.path.join(base, "D101KEPT")
+    os.makedirs(os.path.join(kept, "CARD101"))
+    with open(os.path.join(kept, "CARD101", "notes.txt"), "w") as f:
+        f.write("mine")
+    refused_for_space([kept])
+    check("a card folder that was already there stays, with what it held",
+          "CARD101/notes.txt" in tree(kept)
+          and not any(p.startswith("CARD101/DCIM") for p in tree(kept)),
+          str(tree(kept)))
+
+    # Something landing in the new folder before the job gives up keeps it.
+    busy = os.path.join(base, "D101BUSY")
+    os.makedirs(busy)
+    def drop_file(path):
+        with open(os.path.join(busy, "CARD101", "arrived.txt"), "w") as f:
+            f.write("x")
+    refused_for_space([busy], on_stat=drop_file)
+    check("a new card folder that gained a file is not removed",
+          tree(busy) == ["CARD101", "CARD101/.dumptruck-job.lock", "CARD101/arrived.txt"],
+          str(tree(busy)))
+
+    # exFAT: macOS keeps the lock's attributes in a "._" file beside it and
+    # removes it with the lock, so the cleanup lets that name through (the
+    # real thing is checked on an exFAT image, not here). An ordinary file
+    # with that name is somebody's file: it stays, and so does the folder.
+    named = os.path.join(base, "D101SIDECAR")
+    os.makedirs(named)
+    def add_plain_file(path):
+        with open(os.path.join(named, "CARD101", "._.dumptruck-job.lock"), "w") as f:
+            f.write("x")
+    refused_for_space([named], on_stat=add_plain_file)
+    check("an ordinary file named like the lock's ._ sidecar is never deleted",
+          tree(named) == ["CARD101", "CARD101/._.dumptruck-job.lock"], str(tree(named)))
+
+    # Another offload holding the folder: this run is refused and takes nothing.
+    import fcntl
+    peer = os.path.join(base, "D101PEER")
+    os.makedirs(os.path.join(peer, "CARD101"))
+    peer_lock = os.open(os.path.join(peer, "CARD101", ".dumptruck-job.lock"),
+                        os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(peer_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        try:
+            engine.offload(src, [peer], label="CARD101", source_reread=False)
+            peer_refused = False
+        except RuntimeError as e:
+            peer_refused = "another offload is already writing" in str(e)
+    finally:
+        os.close(peer_lock)
+    check("a folder another offload holds is refused and left alone",
+          peer_refused and tree(peer) == ["CARD101", "CARD101/.dumptruck-job.lock"],
+          str(tree(peer)))
+
+    # Sol, PR #32: a second offload opens the lock, then the first one
+    # unlinks it and a file landing in the folder makes rmdir fail. The
+    # folder survives without a lock. The second offload must not go on
+    # believing the unlinked lock it now holds is the folder's.
+    race = os.path.join(base, "D101RACE")
+    os.makedirs(race)
+    race_card = os.path.join(race, "CARD101")
+    first = threading.current_thread()
+    second_at_flock, first_done = threading.Event(), threading.Event()
+    second_said = []
+    real_unlink, real_rmdir, real_flock = os.unlink, os.rmdir, fcntl.flock
+
+    def second_offload():
+        try:
+            engine.offload(src, [race], label="CARD101", source_reread=False)
+            second_said.append("copied")
+        except RuntimeError as e:
+            second_said.append(str(e))
+
+    def flock_paused(fd, operation):
+        if threading.current_thread() is not first and operation & fcntl.LOCK_EX:
+            second_at_flock.set()
+            first_done.wait(20)
+        return real_flock(fd, operation)
+
+    def unlink_after_second_opens(path, *args, **kwargs):
+        if path == ".dumptruck-job.lock" and not second_at_flock.is_set():
+            threading.Thread(target=second_offload, name="second").start()
+            second_at_flock.wait(20)
+        return real_unlink(path, *args, **kwargs)
+
+    def rmdir_loses_to_a_file(path, *args, **kwargs):
+        if path == "CARD101":
+            with open(os.path.join(race_card, "arrived.txt"), "w") as f:
+                f.write("x")
+        return real_rmdir(path, *args, **kwargs)
+
+    def full_for_first_only(path):
+        if threading.current_thread() is first:
+            return types.SimpleNamespace(f_bavail=0, f_frsize=4096)
+        return real_statvfs(path)
+
+    fcntl.flock, os.unlink, os.rmdir = flock_paused, unlink_after_second_opens, rmdir_loses_to_a_file
+    engine.os.statvfs = full_for_first_only
+    try:
+        try:
+            engine.offload(src, [race], label="CARD101", source_reread=False)
+            first_refused = False
+        except RuntimeError as e:
+            first_refused = "not enough space" in str(e)
+        first_done.set()
+        for t in threading.enumerate():
+            if t.name == "second":
+                t.join(30)
+    finally:
+        first_done.set()
+        fcntl.flock, os.unlink, os.rmdir = real_flock, real_unlink, real_rmdir
+        engine.os.statvfs = real_statvfs
+    check("the race is the one meant: refused, lock unlinked, folder kept by a late file",
+          first_refused and tree(race) == ["CARD101", "CARD101/arrived.txt"],
+          f"{first_refused} {tree(race)}")
+    check("an offload holding the unlinked lock is refused, not left to write",
+          len(second_said) == 1 and "being removed by another offload" in second_said[0],
+          str(second_said))
+    r_race = engine.offload(src, [race], label="CARD101", source_reread=False)
+    check("the folder then takes an offload under a fresh lock",
+          r_race.ok and "CARD101/.dumptruck-job.lock" in tree(race))
+
+    # The same drive takes the card once there is room, empty folders included.
+    r = engine.offload(src, [fresh_a], label="CARD101", source_reread=False)
+    after = tree(fresh_a)
+    check("the refused drive takes the card on the next run",
+          r.ok and "CARD101/DCIM/100MEDIA/a.mov" in after
+          and "CARD101/PRIVATE/M4ROOT/CLIP/c.mxf" in after
+          and "CARD101/DCIM/EMPTY" in after,
+          str(after))
+
+
 def scenario_mixed_trust_blocks_wipe(base):
     """[85] Desktop QA round 3, R3-06 (critical). A run that mixes a copy
     trusted from history on one destination with a fresh copy on the other
@@ -1320,6 +1493,32 @@ def scenario_flush_failure_names_the_volume(base):
                      "bracketed IPv6": {"2001:db8::5"}, "other mount's entry": None,
                      "smbutil error": None, "not JSON": None, "no server_inet": None,
                      "no channels": None}, str(parsed))
+
+    # 0.6.0: the app pauses a transfer by suspending the engine. A pause that
+    # lands inside this query outlives its deadline, so one timeout is asked
+    # again; a share that times out twice is still unknown.
+    asked_once, asked_twice = [], []
+
+    def times_out_once(*a, **k):
+        asked_once.append(1)
+        if len(asked_once) == 1:
+            raise _sp.TimeoutExpired(a[0], k.get("timeout"))
+        return SimpleNamespace(returncode=0, stdout=real_json, stderr="")
+
+    def times_out(*a, **k):
+        asked_twice.append(1)
+        raise _sp.TimeoutExpired(a[0], k.get("timeout"))
+    try:
+        _sp.run = times_out_once
+        after_pause = engine.macio.smb_server_addresses("/Volumes/FOLIAGE")
+        _sp.run = times_out
+        unreadable = engine.macio.smb_server_addresses("/Volumes/FOLIAGE")
+    finally:
+        _sp.run = real_run
+    check("a share query that timed out once is asked again; twice is unknown",
+          after_pause == {"127.0.0.1"} and len(asked_once) == 2
+          and unreadable is None and len(asked_twice) == 2,
+          f"{after_pause} after {len(asked_once)} asks; {unreadable} after {len(asked_twice)}")
 
     real_smb = engine.macio.smb_server_addresses
     named_smb = dict(nas, vol=("/Volumes/FOLIAGE", "smbfs", False,
@@ -4109,6 +4308,7 @@ else:
     finally:
         os.chmod(locked90, 0o755)
 
+    scenario_refused_drive_left_as_found(base)
     scenario_final_verify_lifecycle(base)
     scenario_final_verify_topology()
 

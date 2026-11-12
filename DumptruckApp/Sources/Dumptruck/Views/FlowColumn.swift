@@ -1360,7 +1360,8 @@ struct JobHeaderBand: View {
                     .font(.headline)
                     .lineLimit(1).truncationMode(.middle)
                 Spacer()
-                VerdictBadge(verdict: job.verdict, phaseText: job.phase.rawValue,
+                VerdictBadge(verdict: job.verdict, phaseText: job.activityText,
+                             paused: job.isPaused,
                              authorityWithdrawn: job.destinationAuthorityWithdrawn != nil,
                              needsAttention: job.verifiedNeedsAttention,
                          stopped: job.stoppedByOperator)
@@ -1437,6 +1438,7 @@ struct JobHeaderBand: View {
             // Amber = copying; the verify re-read below keeps indigo — the
             // phase distinction the chrome carries (2026-08-26 facelift).
             PhaseBar(fraction: job.fraction, tint: Brand.amber)
+                .opacity(job.isPaused ? 0.45 : 1)
             HStack(spacing: 10) {
                 // No rolling digits on any copy counter: at copy speed a
                 // roll never finishes, and screenshots caught "5_ / 129" and
@@ -1451,7 +1453,8 @@ struct JobHeaderBand: View {
                 // once-per-second re-read counter below does roll.
                 Text("\(bytesString(job.displayedBytesDone)) of \(bytesString(job.bytesTotal))")
                 Spacer()
-                if let secs = copyETASeconds {
+                // No ETA while paused: nothing is moving toward it.
+                if !job.isPaused, let secs = copyETASeconds {
                     ETAReadout(secondsRemaining: secs)
                         .id(job.phase)
                 }
@@ -1465,6 +1468,7 @@ struct JobHeaderBand: View {
                 .overlay {
                     MilestoneTicksOverlay(fraction: frac)
                 }
+                .opacity(job.isPaused ? 0.45 : 1)
             HStack(spacing: 10) {
                 Text("checking the card a second time")
                 Text("·")
@@ -1472,7 +1476,7 @@ struct JobHeaderBand: View {
                     .contentTransition(.numericText())
                     .animation(digitAnimation, value: job.rereadDone)
                 Spacer()
-                if let secs = rereadETASeconds {
+                if !job.isPaused, let secs = rereadETASeconds {
                     ETAReadout(secondsRemaining: secs)
                         .id(job.phase)
                 }
@@ -1494,7 +1498,7 @@ struct JobHeaderBand: View {
             }
         } else {
             PhaseBar(fraction: nil, tint: Semantics.running)
-            Text(job.phase.rawValue)
+            Text(job.activityText)
                 .font(Typo.evidence).foregroundStyle(.secondary)
         }
         if !job.currentFile.isEmpty {
@@ -1534,7 +1538,7 @@ struct JobHeaderBand: View {
                     .foregroundStyle(isNext ? Semantics.runningText : .secondary)
 
                     if model.isDispatchPaused {
-                        Text("· Dispatch Paused")
+                        Text("· queue on hold")
                             .font(Typo.evidenceQuiet)
                             .foregroundStyle(Semantics.warningText)
                     }
@@ -1576,6 +1580,17 @@ struct JobHeaderBand: View {
                 }
             }
         } else {
+            if job.isPaused {
+                // The one thing a paused card must say: it still holds the
+                // card and the drives.
+                Label("Paused. Nothing is being read or written. Keep the card and drives connected.",
+                      systemImage: "pause.circle")
+                    .font(Typo.safetyBody)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                pauseResumeButton
             Button(job.stopRequested ? "Stopping…" : "Stop Transfer", role: .destructive) {
                 stopConfirmation = true
             }
@@ -1589,13 +1604,44 @@ struct JobHeaderBand: View {
                 Button("Stop", role: .destructive) {
                     model.stop(job: job)
                 }
-                Button("Keep Copying", role: .cancel) {}
+                Button(job.isPaused ? "Keep Paused" : "Keep Copying", role: .cancel) {}
+            }
             }
         }
         // A quiet, entirely optional nudge: the games exist and now is the
         // one moment they're useful. Caption-weight, dismiss-free, and it
         // never renders on a finished card. Simple view leaves it out.
         if !simpleView { arcadeNudge }
+    }
+
+    /// Pause holds a transfer where it stands and Resume carries on from the
+    /// same byte; Stop abandons it. Offered while bytes are moving (copy and
+    /// the second read of the card), and always while paused, so a paused
+    /// card can never be left without its way back.
+    @ViewBuilder
+    private var pauseResumeButton: some View {
+        if job.isPaused {
+            Button {
+                model.resume(job: job)
+                Haptics.alignment()
+            } label: {
+                Label("Resume", systemImage: "play.fill")
+            }
+            .controlSize(.small)
+            .help("Carry on from where this transfer was paused")
+            .accessibilityLabel("Resume \(job.label)")
+        } else if job.phase == .copying || job.phase == .sourceVerify {
+            Button {
+                model.pause(job: job)
+                Haptics.alignment()
+            } label: {
+                Label("Pause", systemImage: "pause.fill")
+            }
+            .controlSize(.small)
+            .disabled(!model.canPause(job))
+            .help("Hold this transfer where it is. Nothing is lost; Resume carries on from the same place")
+            .accessibilityLabel("Pause \(job.label)")
+        }
     }
 
     /// Simple view keeps the speed graph off the card, except when the
@@ -1660,7 +1706,10 @@ struct JobHeaderBand: View {
                         .imageScale(.small)
                         .foregroundStyle(Semantics.runningText)
                     Group {
-                        if job.currentSpeed > 0 {
+                        if job.isPaused {
+                            Text("paused")
+                                .foregroundStyle(.secondary)
+                        } else if job.currentSpeed > 0 {
                             Text(speedString(job.currentSpeed))
                                 .foregroundStyle(Semantics.runningText)
                                 .contentTransition(.numericText(value: job.currentSpeed))
@@ -2358,14 +2407,16 @@ struct QueueControlBar: View {
         HStack(spacing: 10) {
             Label {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(model.isDispatchPaused ? "Queue Dispatch: Paused" : "Queue Dispatch: Active")
+                    // "Hold", not "Pause": Pause belongs to a running
+                    // transfer now, and this only keeps new ones from starting.
+                    Text(model.isDispatchPaused ? "Queue on hold" : "Queue")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(model.isDispatchPaused ? Semantics.warningText : Semantics.runningText)
                     Text(model.isDispatchPaused
-                         ? "^[\(count) transfer](inflect: true) waiting · automatic dispatch is paused"
+                         ? "^[\(count) transfer](inflect: true) waiting · nothing new starts until you release the queue"
                          : (count > 0
-                            ? "^[\(count) transfer](inflect: true) in queue · transfers start automatically"
-                            : "Queue is ready · automatic dispatch is active"))
+                            ? "^[\(count) transfer](inflect: true) waiting · the next starts when one finishes"
+                            : "Nothing waiting"))
                         .font(Typo.evidenceQuiet)
                         .foregroundStyle(.secondary)
                 }
@@ -2378,16 +2429,16 @@ struct QueueControlBar: View {
             Button {
                 model.toggleDispatchPause()
             } label: {
-                Label(model.isDispatchPaused ? "Resume Dispatch" : "Pause Dispatch",
-                      systemImage: model.isDispatchPaused ? "play.fill" : "pause.fill")
+                Label(model.isDispatchPaused ? "Release Queue" : "Hold Queue",
+                      systemImage: model.isDispatchPaused ? "play.fill" : "hand.raised.fill")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
             .tint(model.isDispatchPaused ? Semantics.warningText : Semantics.runningText)
             .help(model.isDispatchPaused
-                  ? "Resume automatic dispatch of queued transfers"
-                  : "Pause automatic dispatch — running transfers continue uninterrupted")
-            .accessibilityLabel(model.isDispatchPaused ? "Resume queue dispatch" : "Pause queue dispatch")
+                  ? "Let waiting transfers start again"
+                  : "Keep waiting transfers from starting. Transfers already running carry on")
+            .accessibilityLabel(model.isDispatchPaused ? "Release the queue" : "Hold the queue")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

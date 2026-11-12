@@ -54,6 +54,7 @@ struct DumptruckCoreApplication: App {
                 .frame(minWidth: 940, minHeight: 600)
                 .onAppear {
                     AppDelegate.model = model
+                    model.checkForUpdatesIfDue()
                     if CameraComponentTerms.shouldAskAtLaunch(
                         CameraComponentTerms.status(engineRoot: model.engineRoot)) {
                         model.cameraTermsShown = true
@@ -66,6 +67,9 @@ struct DumptruckCoreApplication: App {
             CommandGroup(replacing: .appInfo) {
                 Button("About Dumptruck") {
                     CameraComponents.showAboutPanel(engineRoot: model.engineRoot)
+                }
+                Button("Check for Updates…") {
+                    model.checkForUpdates(userAsked: true)
                 }
                 if CameraComponentTerms.status(engineRoot: model.engineRoot) != .notApplicable {
                     Button("Camera Component Terms…") { model.cameraTermsShown = true }
@@ -101,6 +105,13 @@ struct DumptruckCoreApplication: App {
                     model.startOrExplain()
                 }
                 .keyboardShortcut("r", modifiers: [.command])
+                // One switch for every running transfer: with anything
+                // paused it resumes, otherwise it pauses what can be paused.
+                Button(model.pausedJobs.isEmpty ? "Pause Transfers" : "Resume Transfers") {
+                    model.toggleAllPauses()
+                }
+                .keyboardShortcut("p", modifiers: [.command, .option])
+                .disabled(model.pausedJobs.isEmpty && model.pausableJobs.isEmpty)
             }
             CommandGroup(after: .sidebar) {
                 SimpleViewCommand()

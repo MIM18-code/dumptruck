@@ -172,14 +172,30 @@ def folder_owner(card_root):
     return None
 
 
-def record_offload(source_root, label, card_info, result, known_id=None, vol=None):
-    """Create/update the dataset record after an offload attempt."""
+def record_offload(source_root, label, card_info, result, known_id=None, vol=None,
+                   fallback_anchors=None):
+    """Create/update the dataset record after an offload attempt.
+
+    `fallback_anchors` are the anchors read when the job began. A source
+    pulled mid-copy cannot be read here any more. Where its path survived as
+    an empty folder (a mount point, a folder source that was emptied), its
+    anchors were recorded as empty; the record then matched nothing, so the
+    source came back as a stranger to the folder it had half-filled and its
+    own retry was refused as "another card's footage" (soak pass,
+    2026-11-12). Where the path was gone the scan raised and nothing was
+    recorded at all. Both now keep the anchors the job started with."""
     db = _load()
     if vol is None:
         vol = volume_uuid(source_root)
     rec = None
     if known_id:
         rec = next((r for r in db["datasets"] if r["id"] == known_id), None)
+    try:
+        current_anchors = anchors(source_root)
+    except Exception:
+        if not fallback_anchors:
+            raise
+        current_anchors = []
     now = time.time()
     if rec is None:
         rec = {"id": str(uuid.uuid4()), "first_seen": now, "mounts": 0,
@@ -192,7 +208,7 @@ def record_offload(source_root, label, card_info, result, known_id=None, vol=Non
         "reel_name": card_info.reel_name,
         "volume_uuid": vol,
         "volume_name": os.path.basename(os.path.normpath(source_root)),
-        "anchors": anchors(source_root),
+        "anchors": current_anchors or fallback_anchors or rec.get("anchors") or [],
         "last_seen": now,
         "mounts": rec.get("mounts", 0) + 1,
     })

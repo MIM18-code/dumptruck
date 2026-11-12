@@ -237,10 +237,23 @@ def smb_server_addresses(mount):
     import json
     import subprocess
 
-    try:
-        out = subprocess.run(["smbutil", "multichannel", "-m", mount, "-x", "-f", "json"],
-                             capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
+    # A timeout gets one more ask. The app pauses a transfer by suspending
+    # this process. A pause that lands inside the query outlives the
+    # deadline, and the answer smbutil gave meanwhile is thrown away with
+    # it; "unknown" then withdraws a healthy share for the rest of the job
+    # (Codex review of the Pause change, 2026-11-12). A share that really
+    # cannot be read times out the second time too.
+    out = None
+    for _attempt in range(2):
+        try:
+            out = subprocess.run(["smbutil", "multichannel", "-m", mount, "-x", "-f", "json"],
+                                 capture_output=True, text=True, timeout=10)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+        except (OSError, subprocess.SubprocessError):
+            return None
+    if out is None:
         return None
     if out.returncode != 0:
         return None

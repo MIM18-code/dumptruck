@@ -52,6 +52,7 @@ DumptruckApp/Sources/Dumptruck/RemoteWebhookNotification.swift
 DumptruckApp/Sources/Dumptruck/SettingsView.swift
 DumptruckApp/Sources/Dumptruck/SourceMutationMonitor.swift
 DumptruckApp/Sources/Dumptruck/TemplateRenderer.swift
+DumptruckApp/Sources/Dumptruck/UpdateCheck.swift
 DumptruckApp/Sources/Dumptruck/Views/BatchSourceStagingView.swift
 DumptruckApp/Sources/Dumptruck/Views/CapacityGauge.swift
 DumptruckApp/Sources/Dumptruck/Views/ConnectedShelf.swift

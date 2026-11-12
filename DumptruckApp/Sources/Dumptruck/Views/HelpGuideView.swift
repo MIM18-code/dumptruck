@@ -59,6 +59,13 @@ struct HelpGuideView: View {
 
                     4.  Click Start Offload. The job card in the middle shows \
                     per-drive progress, a live speed readout, and the time left.
+
+                    Pause holds a transfer where it is, and Resume carries on \
+                    from the same place. Nothing is copied twice and nothing \
+                    is lost. A paused transfer still holds its card and \
+                    drives, so keep them connected. Stop Transfer is \
+                    different: it gives the transfer up. File > Pause \
+                    Transfers pauses or resumes all of them at once.
                     """)
 
                     section("Reading the verdict", """
@@ -184,6 +191,17 @@ struct HelpGuideView: View {
                     cards while they run. Sounds can be turned off in Settings. \
                     None of this touches the safety logic; the verdict vocabulary \
                     stays boring on purpose.
+                    """)
+
+                    section("New versions", """
+                    Once a day Dumptruck asks GitHub whether a newer version \
+                    is out. When one is, a line at the top of the window says \
+                    so, with a Download button that opens the disk image in \
+                    your browser. Nothing installs by itself, and nothing \
+                    about your Mac or your jobs is sent. Turn it off in \
+                    Settings > Display, or ask right away with Dumptruck > \
+                    Check for Updates…. If you installed with Homebrew, \
+                    `brew upgrade --cask dumptruck` does the same job.
                     """)
 
                     section("Menu bar and Dock", """

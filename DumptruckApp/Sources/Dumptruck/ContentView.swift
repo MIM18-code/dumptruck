@@ -130,10 +130,59 @@ struct ContentView: View {
         .environment(\.dynamicTypeSize, TextScale.current(textScaleRaw).dynamicTypeSize)
     }
 
+    private func updateLine(_ update: AvailableUpdate) -> String {
+        guard let current = AppModel.runningVersion else { return "\(update.name) is available." }
+        return "\(update.name) is available. This is \(current)."
+    }
+
     /// Setup/eject problems surface over the center, where the eye already
     /// is — the rails stay clean for state.
     @ViewBuilder
     private var errorStrip: some View {
+        // News, not a fault: neutral ground, one line, and it never moves
+        // a transfer. Download opens the disk image in the browser.
+        if let update = model.availableUpdate {
+            HStack(spacing: 10) {
+                Label(updateLine(update), systemImage: "arrow.down.circle")
+                    .font(Typo.safety)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button("Download") { model.openUpdateDownload() }
+                    .controlSize(.small)
+                    .help("Open the new version's disk image in your browser. With Homebrew: brew upgrade --cask dumptruck")
+                Button("What's New") { NSWorkspace.shared.open(update.pageURL) }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                Button {
+                    model.hideAvailableUpdate()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(HoverHighlightButtonStyle())
+                .foregroundStyle(.secondary)
+                .help("Hide this until the next version")
+                .accessibilityLabel("Hide the update notice until the next version")
+            }
+            .padding(.horizontal, 14).padding(.vertical, 5)
+            .background(Brand.amber.opacity(Semantics.chip))
+        }
+        if let notice = model.updateNotice {
+            HStack(spacing: 8) {
+                Label(notice, systemImage: "checkmark.circle")
+                    .font(Typo.safetyBody)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    model.updateNotice = nil
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(HoverHighlightButtonStyle())
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Dismiss message")
+            }
+            .padding(.horizontal, 14).padding(.vertical, 5)
+            .background(.background.secondary)
+        }
         if let err = model.engineConfigurationError,
            model.lastSetupError != err {
             Label(err, systemImage: "gearshape.2.fill")

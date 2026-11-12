@@ -20,6 +20,9 @@ enum Pref {
     static let soundEffects = "soundEffects"             // Bool, default true — truck SFX
     static let haptics = "haptics"                       // Bool, default true — trackpad taps
     static let menuBarHUD = "menuBarHUD"                 // Bool, default true
+    static let checkForUpdates = "checkForUpdates"       // Bool, default true
+    static let lastUpdateCheck = "lastUpdateCheck"       // seconds since 1970
+    static let skippedUpdateVersion = "skippedUpdateVersion"   // "0.6.1"
     static let folderTemplate = "folderTemplate"         // e.g. {Project}/Raws
     static let projectName = "projectName"
     static let projectRecents = "projectRecents"         // pipe-separated
@@ -591,6 +594,7 @@ private struct DisplaySettings: View {
     @AppStorage(Pref.textScale) private var textScaleRaw = TextScale.standard.rawValue
     @AppStorage(Pref.menuBarHUD) private var menuBarHUD = true
     @AppStorage(Pref.simpleView) private var simpleView = true
+    @AppStorage(Pref.checkForUpdates) private var checkForUpdates = true
 
     var body: some View {
         Form {
@@ -610,6 +614,11 @@ private struct DisplaySettings: View {
             Section {
                 settingRow(caption: "Shows active jobs, their combined speed, and the most urgent outstanding verdict. Clicking it opens Dumptruck.") {
                     Toggle("Show transfer status in the menu bar", isOn: $menuBarHUD)
+                }
+            }
+            Section {
+                settingRow(caption: "Asks GitHub once a day whether a newer Dumptruck is out and shows a line in the window when one is. Nothing about your Mac, your drives or your jobs is sent, and nothing is downloaded until you click Download. Dumptruck > Check for Updates… asks right away.") {
+                    Toggle("Tell me when a newer version is out", isOn: $checkForUpdates)
                 }
             }
         }

@@ -344,10 +344,10 @@ def cmd_offload(args):
             # A GUI-staged folder of clones. It is not a card: no format
             # signature, no dataset identity, no label memory, no continuation.
             card = cards.CardInfo("loose", "Picked files")
-            known, vol, ambiguous = None, None, False
+            known, vol, ambiguous, start_anchors = None, None, False, None
         else:
             card = cards.detect(args.source)
-            known, vol, _anchors, ambiguous = identity.identify(args.source)
+            known, vol, start_anchors, ambiguous = identity.identify(args.source)
     except Exception as e:  # noqa: BLE001 — even preflight owns a terminal frame
         if args.json:
             print(json.dumps({"event": "job_failed", "error": str(e)}), flush=True)
@@ -492,7 +492,8 @@ def cmd_offload(args):
     try:
         if not loose:
             dataset = identity.record_offload(args.source, label, card, result,
-                                              known_id=known["id"] if known else None, vol=vol)
+                                              known_id=known["id"] if known else None, vol=vol,
+                                              fallback_anchors=start_anchors)
     except Exception as e:  # noqa: BLE001
         result.warnings.append(f"card registry update failed: {e} "
                                "(copy state unaffected; label memory not updated)")

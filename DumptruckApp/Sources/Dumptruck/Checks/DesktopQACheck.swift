@@ -884,6 +884,94 @@ enum DesktopQACheck {
         defaults.set(namingTemplate, forKey: Pref.folderTemplate)
         model.unassignDestination(nameDest)
 
+        // ---- New-version notice (2026-11-12). Pure parsing and the hide
+        // rule; no request is made here.
+        require(UpdateCheck.numbers("v0.5.22-beta") == [0, 5, 22] && UpdateCheck.numbers("0.6") == [0, 6]
+                    && UpdateCheck.numbers("0.6.1 beta") == [0, 6, 1],
+                "tags and titles reduce to their numbers")
+        require(UpdateCheck.numbers("beta") == nil && UpdateCheck.numbers("") == nil && UpdateCheck.numbers("1..2") == nil,
+                "a tag without dotted numbers is not a version")
+        require(UpdateCheck.isNewer("v0.5.22-beta", than: "0.5.21") && UpdateCheck.isNewer("0.6.0", than: "0.5.99")
+                    && UpdateCheck.isNewer("0.10.0", than: "0.9.9") && UpdateCheck.isNewer("1.0", than: "0.99.99"),
+                "numbers compare as numbers, not text")
+        require(!UpdateCheck.isNewer("0.5.22", than: "0.5.22") && !UpdateCheck.isNewer("0.5.21", than: "0.5.22")
+                    && !UpdateCheck.isNewer("0.6", than: "0.6.0") && !UpdateCheck.isNewer("junk", than: "0.5.22"),
+                "the same or an older version is not news")
+        let releaseList = """
+        [{"tag_name":"v0.9.0-beta","draft":true,"name":"Draft","html_url":"https://github.com/MIM18-code/dumptruck/releases/tag/v0.9.0-beta","assets":[]},
+         {"tag_name":"v0.5.22-beta","draft":false,"prerelease":true,"name":"Dumptruck 0.5.22 beta",
+          "html_url":"https://github.com/MIM18-code/dumptruck/releases/tag/v0.5.22-beta",
+          "assets":[{"name":"SHA256SUMS","browser_download_url":"https://github.com/MIM18-code/dumptruck/releases/download/v0.5.22-beta/SHA256SUMS"},
+                    {"name":"Dumptruck-0.5.22-beta-arm64.dmg","browser_download_url":"https://github.com/MIM18-code/dumptruck/releases/download/v0.5.22-beta/Dumptruck-0.5.22-beta-arm64.dmg"}]},
+         {"tag_name":"v0.6.0-beta","draft":false,"name":"Dumptruck 0.6.0 beta",
+          "html_url":"https://github.com/MIM18-code/dumptruck/releases/tag/v0.6.0-beta",
+          "assets":[{"name":"Dumptruck-0.6.0-beta-arm64.dmg","browser_download_url":"https://evil.example/Dumptruck.dmg"}]},
+         {"tag_name":"v0.7.0","draft":false,"name":"Elsewhere","html_url":"https://github.com/someone-else/dumptruck/releases/tag/v0.7.0","assets":[]},
+         {"tag_name":"v0.5.21-beta","draft":false,"name":"Dumptruck 0.5.21 beta","html_url":"https://github.com/MIM18-code/dumptruck/releases/tag/v0.5.21-beta","assets":[]}]
+        """.data(using: .utf8)!
+        let newest = UpdateCheck.newest(in: releaseList, newerThan: "0.5.21")
+        require(newest?.version == "0.6.0" && newest?.name == "Dumptruck 0.6.0 beta",
+                "the highest published release wins, whatever the list order; drafts and other projects are skipped: \(String(describing: newest))")
+        require(newest?.downloadURL == nil && newest?.pageURL.absoluteString == "https://github.com/MIM18-code/dumptruck/releases/tag/v0.6.0-beta",
+                "a download link that leaves this project's GitHub pages is dropped; the release page stands in")
+        let previous = UpdateCheck.newest(in: releaseList, newerThan: "0.6.0")
+        require(previous == nil, "nothing newer than the running version is not an update: \(String(describing: previous))")
+        let patch = UpdateCheck.newest(in: Data(releaseList.dropLast(0)), newerThan: "0.5.21")
+        require(patch == newest, "parsing is deterministic")
+        require(UpdateCheck.newest(in: Data("not json".utf8), newerThan: "0.5.21") == nil, "a broken answer is no update")
+        for escape in ["https://github.com/MIM18-code/dumptruck/../../someone/else/releases/tag/v0.8.0",
+                       "https://github.com/MIM18-code/dumptruck/%2e%2e/%2e%2e/someone/else/releases/tag/v0.8.0"] {
+            let escaped = Data(#"[{"tag_name":"v0.8.0","draft":false,"name":"x","html_url":"\#(escape)","assets":[]}]"#.utf8)
+            require(UpdateCheck.newest(in: escaped, newerThan: "0.5.21") == nil,
+                    "a link that climbs out of this project's pages is not accepted: \(escape)")
+        }
+        // The automatic check counts the attempt, not the answer: with the
+        // check on and a day gone by, the stamp moves only in a real app
+        // (the checks have no bundle version, so nothing is asked or stamped).
+        let savedStamp = defaults.object(forKey: Pref.lastUpdateCheck)
+        let savedToggle = defaults.object(forKey: Pref.checkForUpdates)
+        defaults.set(true, forKey: Pref.checkForUpdates)
+        defaults.set(0.0, forKey: Pref.lastUpdateCheck)
+        model.checkForUpdatesIfDue()
+        require(defaults.double(forKey: Pref.lastUpdateCheck) == 0, "outside an app bundle the automatic check does nothing")
+        defaults.set(savedStamp, forKey: Pref.lastUpdateCheck)
+        defaults.set(savedToggle, forKey: Pref.checkForUpdates)
+        let dmgRelease = UpdateCheck.newest(in: releaseList, newerThan: "0.5.21").flatMap { _ in
+            UpdateCheck.newest(in: Data(String(decoding: releaseList, as: UTF8.self)
+                .replacingOccurrences(of: "https://evil.example/Dumptruck.dmg",
+                                      with: "https://github.com/MIM18-code/dumptruck/releases/download/v0.6.0-beta/Dumptruck-0.6.0-beta-arm64.dmg").utf8),
+                               newerThan: "0.5.21")
+        }
+        require(dmgRelease?.downloadURL?.lastPathComponent == "Dumptruck-0.6.0-beta-arm64.dmg",
+                "the project's own disk image is the download")
+        // Hiding a version keeps the automatic check quiet about it; asking
+        // by hand shows it again, and a newer version shows either way.
+        let savedSkip = defaults.object(forKey: Pref.skippedUpdateVersion)
+        defaults.removeObject(forKey: Pref.skippedUpdateVersion)
+        model.applyUpdateCheck(newest, current: "0.5.21", userAsked: false)
+        require(model.availableUpdate == newest && model.updateNotice == nil, "an automatic check shows the update")
+        model.hideAvailableUpdate()
+        require(model.availableUpdate == nil && defaults.string(forKey: Pref.skippedUpdateVersion) == "0.6.0",
+                "hiding remembers the version")
+        model.applyUpdateCheck(newest, current: "0.5.21", userAsked: false)
+        require(model.availableUpdate == nil, "the automatic check stays quiet about a hidden version")
+        model.applyUpdateCheck(newest, current: "0.5.21", userAsked: true)
+        require(model.availableUpdate == newest, "asking by hand shows it again")
+        let later = AvailableUpdate(version: "0.6.1", name: "Dumptruck 0.6.1 beta",
+                                    pageURL: newest!.pageURL, downloadURL: nil)
+        model.availableUpdate = nil
+        model.applyUpdateCheck(later, current: "0.5.21", userAsked: false)
+        require(model.availableUpdate == later, "a newer version than the hidden one shows")
+        model.applyUpdateCheck(nil, current: "0.6.1", userAsked: false)
+        require(model.availableUpdate == nil && model.updateNotice == nil, "no news from an automatic check says nothing")
+        model.applyUpdateCheck(nil, current: "0.6.1", userAsked: true)
+        require(model.updateNotice == "Dumptruck 0.6.1 is the newest version.", "a check the operator asked for always answers")
+        model.updateNotice = nil
+        defaults.set(savedSkip, forKey: Pref.skippedUpdateVersion)
+        // A model built here never asks GitHub: the automatic check needs a
+        // bundle version, and the checks have none.
+        require(AppModel.runningVersion == nil, "the check suite runs outside an app bundle")
+
         // ---- Issue #24: a card that is already copying cannot be added
         // through the folder pickers. No destination is staged here, so the
         // added card waits and no engine read starts.

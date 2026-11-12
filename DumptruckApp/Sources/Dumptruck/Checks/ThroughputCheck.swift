@@ -814,6 +814,46 @@ restoredETA.filesSkipped = 90
 require(restoredETA.copyETASeconds(at: t0.addingTimeInterval(10)) == 10,
         "trusted continuation lost its file-driven ETA")
 
+// Pause and resume (2026-11-11). A paused transfer moves no bytes on
+// purpose: it is not a stall, its clock stands still, and paused time never
+// counts against the ETA after Resume.
+let pausing = Job(label: "PAUSE", sourcePath: "/source", destinations: ["/dest"])
+pausing.phase = .copying
+pausing.filesTotal = 2
+pausing.bytesTotal = 3 * 1024 * 1024 * 1024
+pausing.recordThroughput(0, phase: "copy", at: t0)
+pausing.noteFileActivity()
+pausing.recordCopyProgress(path: "A.mov", done: 1024 * 1024 * 1024)
+pausing.recordThroughput(pausing.copyBytesRead, phase: "copy", at: t0.addingTimeInterval(10))
+pausing.filesCopied = 1
+require(pausing.copyETASeconds(at: t0.addingTimeInterval(10)) == 20, "20 s left before the pause")
+require(!pausing.isPaused && pausing.activityText == JobPhase.copying.rawValue, "a job starts unpaused")
+pausing.markPaused(at: t0.addingTimeInterval(10))
+require(pausing.isPaused && pausing.activityText == "Paused", "the card says Paused")
+require(pausing.isRunning && pausing.phase == .copying, "a paused job is still in flight, in its phase")
+require(pausing.currentSpeed == 0, "a paused job shows no speed")
+// Ten minutes pass. The sampler must not turn the silence into a stall.
+for second in stride(from: 11, through: 610, by: 1) {
+    pausing.sampleThroughput(at: t0.addingTimeInterval(Double(second)))
+}
+require(pausing.stallSeconds == 0 && pausing.stallObservation == nil,
+        "a pause must never read as a stalled or hung engine: \(pausing.stallSeconds)")
+require(!pausing.throttleAdvisory, "a pause is not a slowdown")
+require(pausing.copyETASeconds(at: t0.addingTimeInterval(610)) == 20,
+        "the estimate stands still while paused")
+pausing.markResumed(at: t0.addingTimeInterval(610))
+require(!pausing.isPaused, "Resume clears the pause")
+require(pausing.copyETASeconds(at: t0.addingTimeInterval(610)) == 20,
+        "ten paused minutes are not transfer time: \(String(describing: pausing.copyETASeconds(at: t0.addingTimeInterval(610))))")
+// The first sample after Resume measures from the resume, so a healthy
+// second of copying is not averaged over the pause.
+pausing.recordCopyProgress(path: "A.mov", done: 1024 * 1024 * 1024 + 100_000_000)
+pausing.recordThroughput(pausing.copyBytesRead, phase: "copy", at: t0.addingTimeInterval(611))
+pausing.sampleThroughput(at: t0.addingTimeInterval(611))
+require(pausing.currentSpeed > 90_000_000, "speed after Resume is measured from the resume: \(pausing.currentSpeed)")
+pausing.markResumed(at: t0.addingTimeInterval(700))   // a second Resume changes nothing
+require(pausing.copyETASeconds(at: t0.addingTimeInterval(611)) != nil, "an extra Resume leaves the anchors alone")
+
         print("ThroughputCheck: all assertions passed")
     }
 }

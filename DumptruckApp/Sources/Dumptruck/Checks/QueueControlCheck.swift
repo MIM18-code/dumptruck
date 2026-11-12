@@ -8,7 +8,7 @@ static func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
     @MainActor
-    static func run() throws {
+    static func run() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("dumptruck-queue-control-check-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -317,6 +317,84 @@ static func require(_ condition: @autoclosure () -> Bool, _ message: String) {
         require(drainModel.jobs.map(\.phase) == [.starting, .starting, .starting],
                 "all at once must launch every queued job: \(drainModel.jobs.map(\.phase))")
         drainModel.terminateAllEngines()
+
+        // -------------------------------------------------------------
+        // 8. Pause and resume a running transfer (2026-11-11). The stand-in
+        //    engine is a real process, so the signals are real: a paused
+        //    engine is stopped, a resumed one runs, and Stop on a paused
+        //    transfer ends it promptly instead of waiting for the kill.
+        // -------------------------------------------------------------
+        func processState(_ pid: Int32) -> String {
+            let ps = Process()
+            ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+            ps.arguments = ["-o", "state=", "-p", String(pid)]
+            let out = Pipe()
+            ps.standardOutput = out
+            try? ps.run()
+            ps.waitUntilExit()
+            let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        defaults.set("off", forKey: Pref.queueMode)
+        let pauseLabel = "PAUSE_\(UUID().uuidString.prefix(8))"
+        let pausable = sleeper(pauseLabel)
+        drainModel.pauseDispatch()
+        drainModel.jobs = [pausable]
+        drainModel.resumeDispatch()
+        require(pausable.phase == .starting, "the stand-in engine launched: \(pausable.phase)")
+        require(!drainModel.canPause(pausable), "nothing to pause before bytes move")
+        drainModel.pause(job: pausable)
+        require(!pausable.isPaused, "Pause before the copy phase does nothing")
+        pausable.phase = .copying   // what the engine's first copy event does
+        require(drainModel.canPause(pausable), "a copying transfer can be paused")
+        guard let pid = drainModel.enginePID(for: pausable) else {
+            fatalError("the stand-in engine process was not found")
+        }
+        drainModel.pause(job: pausable)
+        require(pausable.isPaused && pausable.isRunning, "the job is paused and still in flight")
+        require(processState(pid).hasPrefix("T"), "the engine process is stopped: \(processState(pid))")
+        require(!drainModel.canPause(pausable) && drainModel.pausedJobs.map(\.id) == [pausable.id],
+                "a paused job is listed as paused, not pausable")
+        drainModel.resume(job: pausable)
+        require(!pausable.isPaused, "Resume clears the pause")
+        require(!processState(pid).hasPrefix("T"), "the engine process runs again: \(processState(pid))")
+        // The menu's switch pauses everything pausable, then resumes it.
+        drainModel.toggleAllPauses()
+        require(pausable.isPaused && processState(pid).hasPrefix("T"), "Pause Transfers pauses the running transfer")
+        drainModel.toggleAllPauses()
+        require(!pausable.isPaused && !processState(pid).hasPrefix("T"), "Resume Transfers resumes it")
+        // Stop while paused: the engine must hear SIGTERM at once. Left
+        // suspended it would sit until the five-second kill.
+        drainModel.pause(job: pausable)
+        require(processState(pid).hasPrefix("T"), "paused again before Stop")
+        let stopAt = Date()
+        drainModel.stop(job: pausable)
+        require(!pausable.isPaused && pausable.stopRequested, "Stop ends the pause")
+        for _ in 0..<40 where pausable.isRunning {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        require(!pausable.isRunning && pausable.phase == .failed,
+                "a paused transfer stops when asked: \(pausable.phase)")
+        require(Date().timeIntervalSince(stopAt) < 3.5,
+                "Stop on a paused transfer must not wait for the kill: \(Date().timeIntervalSince(stopAt))s")
+        require(processState(pid).isEmpty, "the engine process is gone")
+        // Quitting with a paused transfer: terminateAllEngines wakes it too.
+        let quitLabel = "PAUSEQUIT_\(UUID().uuidString.prefix(8))"
+        let quitting = sleeper(quitLabel)
+        drainModel.pauseDispatch()
+        drainModel.jobs = [quitting]
+        drainModel.resumeDispatch()
+        quitting.phase = .copying
+        guard let quitPID = drainModel.enginePID(for: quitting) else {
+            fatalError("the second stand-in engine was not found")
+        }
+        drainModel.pause(job: quitting)
+        require(processState(quitPID).hasPrefix("T"), "paused before quit")
+        drainModel.terminateAllEngines()
+        for _ in 0..<30 where !processState(quitPID).isEmpty {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        require(processState(quitPID).isEmpty, "a paused engine does not outlive the app's terminate")
 
         print("QueueControlCheck: all assertions passed")
     }

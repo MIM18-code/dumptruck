@@ -15,6 +15,8 @@ extension AppModel {
     var hudTitle: String {
         let count = hudActiveJobs.count
         guard count > 0 else { return "" }
+        // Every transfer paused: say so, not "0 KB/s".
+        if hudActiveJobs.allSatisfy(\.isPaused) { return "\(count) · paused" }
         return "\(count) · \(speedString(hudAggregateSpeed))"
     }
 

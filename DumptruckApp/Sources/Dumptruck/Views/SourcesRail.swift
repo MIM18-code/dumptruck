@@ -507,7 +507,7 @@ struct RunningRailRow: View {
 func runningJobLine(_ job: Job) -> String {
     job.phase == .queued
         ? "queued · \(job.label)"
-        : "in job \(job.label) · \(job.phase.rawValue.lowercased())"
+        : "in job \(job.label) · \(job.activityText.lowercased())"
 }
 
 /// Empty-rail drop slot: the invitation IS the affordance — a dashed outline

@@ -6,6 +6,8 @@ import SwiftUI
 struct VerdictBadge: View {
     let verdict: Job.Verdict
     let phaseText: String   // running phases show their phase label
+    /// The operator paused the transfer: a still pause glyph, no pulse.
+    var paused: Bool = false
     /// Wipe permission was withdrawn after the verdict (a drive ejected, a
     /// copy changed). The headline still records what the run proved, but
     /// it must not stay bright green beside "verify again before wiping"
@@ -89,7 +91,7 @@ struct VerdictBadge: View {
                 }
             case .failed where stopped: chip(Self.stoppedLine, "hand.raised.fill")
             case .failed:           chip(verdict.displayLine, "exclamationmark.octagon.fill")
-            case .running:          chip(phaseText, "arrow.triangle.2.circlepath")
+            case .running:          chip(phaseText, paused ? "pause.fill" : "arrow.triangle.2.circlepath")
             }
         }
         // The bounce lives OUTSIDE the switch: each verdict case is its own
@@ -137,7 +139,7 @@ struct VerdictBadge: View {
             .font(.caption.weight(.semibold))
             .imageScale(.small)
             .tracking(0.4)
-            .symbolEffect(.pulse, isActive: !reduceMotion && verdict == .running)
+            .symbolEffect(.pulse, isActive: !reduceMotion && verdict == .running && !paused)
             .padding(.horizontal, 10).padding(.vertical, 4)
             .foregroundStyle(s.ink)
             .background(s.background, in: .capsule)

@@ -31,7 +31,7 @@ package enum DumptruckChecks {
         OrphanEngineCheck.run()
         print("OrphanEngineCheck: PASS")
 
-        try QueueControlCheck.run()
+        try await QueueControlCheck.run()
         print("QueueControlCheck: PASS")
 
         try SourceDropRoutingCheck.run()

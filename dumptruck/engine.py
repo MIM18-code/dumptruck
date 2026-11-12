@@ -595,9 +595,13 @@ def _secure_leaf_fd(root_fd, rel_dir):
         raise
 
 
-def _ensure_dir_tree(root_fd, rel_dir):
+JOB_LOCK_NAME = ".dumptruck-job.lock"
+
+
+def _ensure_dir_tree(root_fd, rel_dir, created=None):
     """Create/open a relative directory tree without following a symlink at
-    any component. Returns an owned descriptor for the leaf."""
+    any component. Returns an owned descriptor for the leaf. Components this
+    call had to make are appended to `created`."""
     components = [c for c in rel_dir.split(os.sep) if c and c != "."]
     if any(c == ".." for c in components):
         raise OSError(errno.EINVAL, "destination path escapes its pinned root", rel_dir)
@@ -606,6 +610,8 @@ def _ensure_dir_tree(root_fd, rel_dir):
         for comp in components:
             try:
                 os.mkdir(comp, dir_fd=fd)
+                if created is not None:
+                    created.append(comp)
             except FileExistsError:
                 pass
             nfd = _open_dir_nofollow(comp, dir_fd=fd)
@@ -615,6 +621,71 @@ def _ensure_dir_tree(root_fd, rel_dir):
     except BaseException:
         os.close(fd)
         raise
+
+
+def _lock_is_named(root_fd, lock_fd):
+    """True while the lock this descriptor holds is the file the card folder
+    names. _leave_as_found unlinks a lock, so a descriptor opened before
+    that can win a flock on a file nobody else will ever open: every holder
+    checks this after the flock, and one that fails it holds nothing."""
+    try:
+        named = os.stat(JOB_LOCK_NAME, dir_fd=root_fd, follow_symlinks=False)
+        held = os.fstat(lock_fd)
+    except OSError:
+        return False
+    return (named.st_dev, named.st_ino) == (held.st_dev, held.st_ino)
+
+
+def _leave_as_found(destinations, card_roots, label, made_roots, held_locks,
+                    root_fds, root_pins):
+    """A job that stops before its first byte takes back what it put on the
+    drive: the card folder it made and the lock inside it. A folder that was
+    already there keeps its lock. Only while the job lock is ours, so no
+    other offload can be working in the folder, and only when the lock is
+    all the folder holds.
+
+    The lock goes first, then the folder by rmdir, which removes only an
+    empty folder (on macOS, also one holding nothing but "._" attribute
+    files). If a file lands in between, the folder stays without a lock;
+    _lock_is_named keeps an offload that opened the old lock from
+    believing it holds the folder. rmdir takes whatever folder has the
+    name at that instant: one swapped in after the identity check is
+    removed only if it is empty in that same sense. Moving the folder
+    aside first would close that, but a move takes a folder with files in
+    it just as readily, so the worse mistake would be the possible one."""
+    for dest, cr in zip(destinations, card_roots):
+        lock_fd = held_locks.get(cr)
+        if cr not in made_roots or lock_fd is None or cr not in root_fds:
+            continue
+        try:
+            dest_fd = _open_dir_nofollow(dest)
+        except OSError:
+            continue
+        try:
+            st = os.stat(label, dir_fd=dest_fd, follow_symlinks=False)
+            if (st.st_dev, st.st_ino) != root_pins.get(cr):
+                continue
+            if not _lock_is_named(root_fds[cr], lock_fd):
+                continue
+            # On exFAT and other volumes without extended attributes macOS
+            # keeps the lock's attributes in a "._" file beside it, and
+            # removes that file itself when the lock is unlinked. It is
+            # never unlinked here: a file of that name macOS leaves behind
+            # is somebody else's, and keeps the folder like any other.
+            sidecar = "._" + JOB_LOCK_NAME
+            if set(os.listdir(root_fds[cr])) - {JOB_LOCK_NAME, sidecar}:
+                continue
+            os.unlink(JOB_LOCK_NAME, dir_fd=root_fds[cr])
+            # Listed again, because rmdir on macOS is not strict about
+            # "._" files: it removes a folder that holds nothing else, and
+            # them with it.
+            if os.listdir(root_fds[cr]):
+                continue
+            os.rmdir(label, dir_fd=dest_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(dest_fd)
 
 
 def _assert_no_symlinks_fd(root_fd, rel="", subtree=None):
@@ -1402,15 +1473,28 @@ def offload(
     ev({"event": "job_started", "label": label, "files": len(entries), "bytes": total_bytes,
         "destinations": card_roots, "verify_mode": verify_mode})
 
-    # Pin the pre-existing destination roots, create/open the card folders and
-    # every source directory through dirfds, then take the per-card locks
-    # through those same descriptors. Path-based makedirs/open here would sit
-    # outside the round-7 NOFOLLOW boundary and could create folders or a lock
-    # file through a directory swapped to a symlink after preflight.
+    # Pin the pre-existing destination roots, create/open the card folders
+    # through dirfds, then take the per-card locks through those same
+    # descriptors. Path-based makedirs/open here would sit outside the
+    # round-7 NOFOLLOW boundary and could create folders or a lock file
+    # through a directory swapped to a symlink after preflight.
     import fcntl as _fcntl
     root_fds = {}
     root_pins = {}
     job_locks = []
+    made_roots = set()   # card folders this run created
+    held_locks = {}      # card root -> its lock descriptor, once the flock is ours
+    writing = []         # non-empty once every refusal point has passed
+
+    def _begin_writing():
+        # The source's folders are made only now. A job refused for space,
+        # history or identity has put nothing on the drive but the card
+        # folder and its lock, and _leave_as_found takes those back.
+        # Created descriptor-relatively (directory structure is data).
+        writing.append(True)
+        for cr in card_roots:
+            for d in source_dirs:
+                os.close(_ensure_dir_tree(root_fds[cr], d))
     source_fd = None
     verify_admission = None
     try:
@@ -1423,11 +1507,14 @@ def offload(
                 "— refused before writing anything")
         for dest, cr in zip(result.destinations, card_roots):
             dest_fd = _open_dir_nofollow(dest)
+            made = []
             try:
-                card_fd = _ensure_dir_tree(dest_fd, label)
+                card_fd = _ensure_dir_tree(dest_fd, label, created=made)
             finally:
                 os.close(dest_fd)
             root_fds[cr] = card_fd
+            if made:
+                made_roots.add(cr)
             st = os.fstat(card_fd)
             root_pins[cr] = (st.st_dev, st.st_ino)
 
@@ -1461,24 +1548,35 @@ def offload(
             card_roots, result.physical_stores_by_root)
 
         for cr in card_roots:
-            lfd = os.open(".dumptruck-job.lock",
-                          os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o644,
-                          dir_fd=root_fds[cr])
+            # Another offload refused before writing takes its folder and
+            # lock back (_leave_as_found). Caught in the middle of that,
+            # this one finds no folder to open the lock in, or wins a flock
+            # on a lock that is no longer the folder's.
+            gone = RuntimeError(
+                f"{cr} was being removed by another offload while this one "
+                "was starting — start it again. Refused before writing.")
+            try:
+                lfd = os.open(JOB_LOCK_NAME,
+                              os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o644,
+                              dir_fd=root_fds[cr])
+            except FileNotFoundError:
+                raise gone from None
             job_locks.append(lfd)  # tracked BEFORE flock: any failure releases all
             try:
                 _fcntl.flock(lfd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
             except OSError:
                 raise RuntimeError(f"another offload is already writing {cr} — refused")
+            if not _lock_is_named(root_fds[cr], lfd):
+                raise gone
+            held_locks[cr] = lfd
 
         # Camera offload folders never legitimately contain symlinks. Audit the
-        # pinned tree BEFORE creating anything below it, then create empty
-        # source folders descriptor-relatively (directory structure is data).
+        # pinned tree BEFORE creating anything below it.
         for cr in card_roots:
             _assert_no_symlinks_fd(root_fds[cr])
-            for d in source_dirs:
-                leaf = _ensure_dir_tree(root_fds[cr], d)
-                os.close(leaf)
     except BaseException:
+        _leave_as_found(result.destinations, card_roots, label, made_roots,
+                        held_locks, root_fds, root_pins)
         for held in job_locks:
             try:
                 os.close(held)
@@ -1503,7 +1601,8 @@ def offload(
                                verify_mode, source_reread, reverify_existing, ev,
                                source_dirs, scan_warnings, root_fds, root_pins,
                                source_pin, early_camera_inventory, source_fd,
-                               verify_admission, selection=selection)
+                               verify_admission, _begin_writing,
+                               selection=selection)
         # Still pinned: withdraw any share whose address turned local or whose
         # mount changed at any point during the copy (Sol S11).
         for cr in share_watch.finish(root_fds):
@@ -1514,6 +1613,9 @@ def offload(
         return result
     finally:
         share_watch.halt()
+        if not writing:
+            _leave_as_found(result.destinations, card_roots, label, made_roots,
+                            held_locks, root_fds, root_pins)
         for lfd in job_locks:
             # Nested finally: a failing explicit unlock must never leak the
             # descriptor (closing releases the flock anyway; round-13).
@@ -2323,7 +2425,7 @@ def _offload_locked(source_root, result, card_roots, entries, hash_formats,
                     verify_mode, source_reread, reverify_existing, ev,
                     initial_dirs, initial_warnings, root_fds, root_pins,
                     source_pin, early_camera_inventory, source_fd,
-                    verify_admission, selection=None):
+                    verify_admission, begin_writing, selection=None):
     label = result.label
 
     def _source_intact(when):
@@ -2423,6 +2525,9 @@ def _offload_locked(source_root, result, card_roots, entries, hash_formats,
                 f"not enough space on the volume holding {roots_by_dev[dev]}: "
                 f"need ~{needed // (1024*1024)} MB (+margin), have "
                 f"{free // (1024*1024)} MB free — refused before writing")
+
+    # Every refusal point has passed: from here the job writes.
+    begin_writing()
 
     # Workers start only after every preflight refusal point has passed, and
     # the drain lives in a finally: no exit path — ENOSPC mid-loop, a dying

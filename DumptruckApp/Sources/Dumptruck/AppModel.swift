@@ -465,6 +465,7 @@ final class AppModel: ObservableObject {
             Pref.soundEffects: true,
             Pref.haptics: true,
             Pref.menuBarHUD: true,
+            Pref.checkForUpdates: true,
             Pref.simpleView: true,
             Pref.folderTemplate: "{Project}/Raws",
             Pref.projectName: "",
@@ -520,7 +521,13 @@ final class AppModel: ObservableObject {
         // written by anything (including our own running jobs) show within
         // 30s. statfs per volume is microseconds — polling is cheap.
         volumeRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { _ in
-            Task { @MainActor [weak self] in self?.refreshVolumes() }
+            Task { @MainActor [weak self] in
+                self?.refreshVolumes()
+                // An app left open for days still hears about a release:
+                // the window appearing once is not a daily check. Two
+                // defaults reads when nothing is due.
+                self?.checkForUpdatesIfDue()
+            }
         }
         // Throughput must advance on wall-clock time, not only when progress
         // events happen. This tick turns a stalled transfer into 0 B/s instead
@@ -900,7 +907,7 @@ final class AppModel: ObservableObject {
             job.enforceSourceMutationFailure()
             finalizeTerminal(job)
         } else if let process = runningProcesses[job.id], process.isRunning {
-            process.terminate()
+            Self.terminateEngine(process)
         }
     }
 
@@ -1998,13 +2005,16 @@ final class AppModel: ObservableObject {
         job.fullyVerified = false
         job.safeToWipe = false
         job.error(Job.stoppedMessage)
+        // Stopping a paused transfer ends the pause: the card shows
+        // "Stopping…", and terminateEngine wakes the process to hear it.
+        job.markResumed()
         _ = persistJournal()
         guard let process = runningProcesses[job.id], process.isRunning else {
             job.phase = .failed
             finalizeTerminal(job)
             return
         }
-        process.terminate()
+        Self.terminateEngine(process)
         let pid = process.processIdentifier
         let jobID = job.id
         Task { @MainActor [weak self, weak process] in
@@ -2037,6 +2047,11 @@ final class AppModel: ObservableObject {
     // MARK: - Queue controls
 
     @Published var isDispatchPaused = false
+
+    /// A newer release the operator has not hidden (UpdateCheck.swift).
+    @Published var availableUpdate: AvailableUpdate?
+    /// The answer to a check the operator asked for, when there is no update.
+    @Published var updateNotice: String?
 
     var queuedJobs: [Job] {
         jobs.filter { $0.phase == .queued }
@@ -3100,6 +3115,8 @@ final class AppModel: ObservableObject {
 
     private func finalizeTerminal(_ job: Job) {
         guard finalizedJobIDs.insert(job.id).inserted else { return }
+        // A settled job is not paused, however its engine ended.
+        job.markResumed()
         let monitorSawMutation = stopJobSourceMonitoring(job.id)
         if monitorSawMutation || job.sourceMutatedAfterStart {
             job.noteSourceMutation()
@@ -3884,7 +3901,77 @@ final class AppModel: ObservableObject {
         stopAllDestinationMonitoring()
         if let p = inspectionProcess, p.isRunning { p.terminate() }
         inspectionProcess = nil
-        for p in runningProcesses.values where p.isRunning { p.terminate() }
+        for p in runningProcesses.values where p.isRunning { Self.terminateEngine(p) }
+    }
+
+    /// SIGTERM waits at the door of a suspended process until it runs
+    /// again. Every engine terminate goes through here, so a paused
+    /// transfer stops, drains its pipes and reports like any other. SIGCONT
+    /// to a process that is already running does nothing.
+    nonisolated static func terminateEngine(_ process: Process) {
+        let pid = process.processIdentifier
+        // Never signal pid 0 or below: that addresses a process group.
+        if process.isRunning, pid > 0 { _ = Darwin.kill(pid, SIGCONT) }
+        process.terminate()
+    }
+
+    // MARK: - Pause and resume a running transfer
+
+    /// Pause covers the phases that move bytes. Before the first file and
+    /// while manifests are sealed there is nothing worth holding, and the
+    /// engine's short device queries there are better left to finish.
+    func canPause(_ job: Job) -> Bool {
+        guard !job.isPaused, !job.stopRequested,
+              job.phase == .copying || job.phase == .sourceVerify,
+              let process = runningProcesses[job.id], process.isRunning else { return false }
+        return true
+    }
+
+    /// Suspend the transfer's engine where it stands. Its open files stay
+    /// open and nothing is lost; the card and drives stay locked because the
+    /// job is still in flight.
+    func pause(job: Job) {
+        guard canPause(job), let process = runningProcesses[job.id] else { return }
+        let pid = process.processIdentifier
+        guard pid > 0, Darwin.kill(pid, SIGSTOP) == 0 else {
+            lastSetupError = "Could not pause \(job.label). The transfer is still running."
+            return
+        }
+        job.markPaused()
+        objectWillChange.send()
+        updateDockTile()
+    }
+
+    func resume(job: Job) {
+        guard job.isPaused else { return }
+        if let process = runningProcesses[job.id], process.isRunning {
+            let pid = process.processIdentifier
+            if pid > 0 { _ = Darwin.kill(pid, SIGCONT) }
+        }
+        job.markResumed()
+        objectWillChange.send()
+        updateDockTile()
+    }
+
+    /// The running engine's process id. Package visibility for the check
+    /// suite, which proves the signals on a real process.
+    func enginePID(for job: Job) -> Int32? {
+        guard let process = runningProcesses[job.id], process.isRunning else { return nil }
+        return process.processIdentifier
+    }
+
+    var pausableJobs: [Job] { jobs.filter(canPause) }
+    var pausedJobs: [Job] { jobs.filter(\.isPaused) }
+
+    /// The menu's one switch: with anything paused it resumes them all,
+    /// otherwise it pauses everything that can be paused.
+    func toggleAllPauses() {
+        let paused = pausedJobs
+        if !paused.isEmpty {
+            paused.forEach(resume)
+        } else {
+            pausableJobs.forEach(pause)
+        }
     }
 
     private func launch(job: Job, plan: LaunchPlan) {
@@ -3954,7 +4041,7 @@ final class AppModel: ObservableObject {
             if stream.buffer.count > 16 * 1024 * 1024, !stream.streamFailed {
                 stream.streamFailed = true
                 stream.buffer.removeAll()
-                p.terminate()
+                AppModel.terminateEngine(p)
             }
         }
         @Sendable nonisolated func dispatchLine(_ line: Data) {
@@ -3990,21 +4077,21 @@ final class AppModel: ObservableObject {
                         if job.errorCount == 0 {
                             job.error("engine emitted a malformed protocol line — result NOT trusted")
                         }
-                        p.terminate()
+                        AppModel.terminateEngine(p)
                         return
                     }
                     let event = obj["event"] as? String
                     if job.sawOffloadComplete {
                         job.engineProtocolOK = false
                         job.error("engine sent events after its terminal event — result NOT trusted")
-                        p.terminate()
+                        AppModel.terminateEngine(p)
                         return
                     }
                     if event == "engine_hello" {
                         if job.sawEngineHello {
                             job.engineProtocolOK = false
                             job.error("engine repeated its handshake — result NOT trusted")
-                            p.terminate()
+                            AppModel.terminateEngine(p)
                             return
                         }
                         job.sawEngineHello = true
@@ -4014,7 +4101,7 @@ final class AppModel: ObservableObject {
                             job.error("engine protocol mismatch — this app needs protocol "
                                       + "\(EngineContract.protocolVersion). "
                                       + "Update the engine folder (Settings > Engine).")
-                            p.terminate()
+                            AppModel.terminateEngine(p)
                         }
                         return
                     }
@@ -4026,14 +4113,14 @@ final class AppModel: ObservableObject {
                             job.error("engine sent data before the required protocol handshake — "
                                       + "result NOT trusted")
                         }
-                        p.terminate()
+                        AppModel.terminateEngine(p)
                         return
                     }
                     if event == "offload_complete",
                        (obj["protocol"] as? Int) != EngineContract.protocolVersion {
                         job.engineProtocolOK = false
                         job.error("terminal event protocol mismatch — result NOT trusted")
-                        p.terminate()
+                        AppModel.terminateEngine(p)
                         return
                     }
                     guard Self.apply(event: obj, to: job) else {
@@ -4045,7 +4132,7 @@ final class AppModel: ObservableObject {
                         job.engineProtocolOK = false
                         job.error("engine sent a malformed \(event ?? "?") event — "
                                   + "result NOT trusted")
-                        p.terminate()
+                        AppModel.terminateEngine(p)
                         return
                     }
                     if event == "job_started" {
@@ -4208,7 +4295,7 @@ final class AppModel: ObservableObject {
             }
             playStartSound()
             if job.stopRequested {
-                p.terminate()
+                Self.terminateEngine(p)
             }
         } catch {
             try? outPipe.fileHandleForWriting.close()
