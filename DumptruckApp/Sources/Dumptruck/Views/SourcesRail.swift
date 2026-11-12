@@ -94,7 +94,7 @@ struct SourcesRail: View {
                     model.chooseFolder(as: "source")
                 } label: {
                     Label("Choose Source Folder…", systemImage: "folder.badge.plus")
-                        .font(.caption)
+                        .labelStyle(RailFooterLabelStyle())
                 }
                 .buttonStyle(HoverHighlightButtonStyle())
                 .help("Copy FROM any folder — not just a whole card. Useful "
@@ -107,7 +107,7 @@ struct SourcesRail: View {
                     model.chooseSourceFiles()
                 } label: {
                     Label("Choose Source Files…", systemImage: "doc.badge.plus")
-                        .font(.caption)
+                        .labelStyle(RailFooterLabelStyle())
                 }
                 .buttonStyle(HoverHighlightButtonStyle())
                 .help("Copy only the clips you pick. Files on a drive copy "
@@ -119,7 +119,7 @@ struct SourcesRail: View {
                     model.chooseBatchSources()
                 } label: {
                     Label("Batch Sources…", systemImage: "square.stack.3d.up")
-                        .font(.caption)
+                        .labelStyle(RailFooterLabelStyle())
                 }
                 .buttonStyle(HoverHighlightButtonStyle())
                 .help("Queue several cards or folders in one pass — one job "
@@ -128,8 +128,22 @@ struct SourcesRail: View {
                 Spacer()
             }
         }
+        // No fill of its own: the footer sits on the rail's recess. A .bar
+        // fill here drew a white slab under a grey rail in light mode.
         .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(.bar)
+    }
+}
+
+/// Rail footer actions: caption text behind an icon column of one width.
+/// Symbols differ in width, and the three labels started at three
+/// different x positions (2026-11-11).
+struct RailFooterLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 6) {
+            configuration.icon.frame(width: 18, alignment: .center)
+            configuration.title
+        }
+        .font(.caption)
     }
 }
 
@@ -197,7 +211,7 @@ private struct BatchRailSection: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .help("Check or change the card names. Start Offload copies every card either way")
+            .help("Check or change the card names. Start Offload copies every Ready card either way")
         }
         .padding(8)
         .background(.background.secondary, in: .rect(cornerRadius: 8))
@@ -211,24 +225,37 @@ private struct BatchRailRow: View {
     let remove: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: candidate.path.hasPrefix("/Volumes/") ? "sdcard.fill" : "folder.fill")
-                .imageScale(.small)
-                .foregroundStyle(Semantics.sourceText)
-            Text(candidate.displayName)
-                .font(.callout)
-                .lineLimit(1).truncationMode(.middle)
-            Spacer(minLength: 4)
-            statusGlyph
-                .help(candidate.statusText)
-                .accessibilityLabel(candidate.statusText)
-            Button(action: remove) {
-                Image(systemName: "minus.circle")
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: candidate.path.hasPrefix("/Volumes/") ? "sdcard.fill" : "folder.fill")
+                    .imageScale(.small)
+                    .foregroundStyle(Semantics.sourceText)
+                Text(candidate.displayName)
+                    .font(.callout)
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                statusGlyph
+                    .help(candidate.statusText)
+                    .accessibilityLabel(candidate.statusText)
+                Button(action: remove) {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(HoverHighlightButtonStyle())
+                .foregroundStyle(.tertiary)
+                .help("Remove from the batch")
+                .accessibilityLabel("Remove \(candidate.displayName) from the batch")
             }
-            .buttonStyle(HoverHighlightButtonStyle())
-            .foregroundStyle(.tertiary)
-            .help("Remove from the batch")
-            .accessibilityLabel("Remove \(candidate.displayName) from the batch")
+            // A refused card stays here while the Ready ones copy, so the
+            // row says why in words; the glyph's tooltip alone hid it.
+            if case .refused(let reason) = candidate.status {
+                Text(reason)
+                    .font(Typo.evidence)
+                    .foregroundStyle(Semantics.dangerText)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 20)
+                    .accessibilityHidden(true)
+            }
         }
     }
 

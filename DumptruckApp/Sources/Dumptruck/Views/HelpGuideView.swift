@@ -101,6 +101,12 @@ struct HelpGuideView: View {
                     copies all of them. Review Batch is there if you want to \
                     check or change the names first.
 
+                    A card that cannot start, one that was pulled or has an \
+                    empty name, does not hold up the others. Start Offload \
+                    copies every card marked Ready, and the one left behind \
+                    stays in the list with its reason. A card that is \
+                    already copying is never added a second time.
+
                     "Batch Sources…" at the bottom of the left rail queues \
                     several cards or folders in one pass. Pick the folders, \
                     review the staged list, and Dumptruck runs one job per card \

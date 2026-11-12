@@ -2,8 +2,9 @@ import Foundation
 import SwiftUI
 
 /// Exact state vocabulary used by the batch sheet. A refused candidate never
-/// silently becomes queueable after another candidate succeeds: the whole
-/// batch must pass preflight together.
+/// silently becomes queueable after another candidate succeeds. It stays in
+/// the list with its reason while the Ready cards start without it: one
+/// card's problem never holds back a dump (issue #25, 2026-11-11).
 enum BatchCandidateStatus: Equatable {
     case pending
     /// Nothing is wrong with the card: no destination is chosen yet, so
@@ -34,6 +35,11 @@ final class BatchSourceCandidate: ObservableObject, Identifiable {
     /// (Joshua, 2026-09-28).
     @Published var renameNote: String?
     var identityPin: FileIdentityPin?
+    /// Why the last preflight held this card out, or nil when it passed.
+    /// Only a new preflight (Re-check, a destination change, a card added)
+    /// clears it: a label edit must not turn the card Ready on a read that
+    /// failed or went stale.
+    var preflightRefusal: String?
     /// The name the batch last wrote into the field itself. While the field
     /// still holds exactly that, the name is the batch's to change; anything
     /// else in the field (typed before the read finished, edited, cleared)
@@ -118,7 +124,7 @@ enum BatchQueueError: Error, Equatable, CustomStringConvertible {
     var description: String {
         switch self {
         case .emptyBatch: return "No sources are staged."
-        case .notReady: return "Every staged source must finish preflight before queueing."
+        case .notReady: return "No staged card is ready to start yet."
         case .preflightFailed(let message): return message
         case .planFailed(let message): return message
         case .sourceChanged(let path): return "Source changed while staging: " + path
@@ -164,6 +170,9 @@ final class BatchSourceStagingModel: ObservableObject {
     @Published var candidates: [BatchSourceCandidate] = []
     @Published var isInspecting = false
     @Published var generalError: String?
+    /// Something the operator should know that is not a fault: a card they
+    /// picked was left out because it is already copying.
+    @Published var notice: String?
     /// The engine's card record, read once per revalidation pass. Checks
     /// replace it so they never read the real one.
     var cardRegistry: () -> [CardFolderClaims.Record] = { CardFolderClaims.loadRegistry() }
@@ -201,6 +210,55 @@ final class BatchSourceStagingModel: ObservableObject {
         cardsReadyToQueue && generalError == nil
     }
 
+    /// Start has something to copy: no read in flight and at least one
+    /// Ready card. Cards that are not Ready stay staged.
+    var canStartReadyCards: Bool {
+        !isInspecting && readyCount > 0
+    }
+
+    /// The refused cards and why, in list order.
+    var refusedCards: [(name: String, reason: String)] {
+        candidates.compactMap { candidate in
+            if case .refused(let reason) = candidate.status {
+                return (candidate.displayName, reason)
+            }
+            return nil
+        }
+    }
+
+    /// What the batch window's banner shows: a problem that is not already
+    /// written on a card's own row. Every refused card says why on its row,
+    /// so a banner repeating one of them said it three times with the chip.
+    /// One reason shared by every card is about the batch, and keeps the
+    /// banner as its headline.
+    var bannerError: String? {
+        guard let generalError else { return nil }
+        let reasons = refusedCards.map(\.reason)
+        guard reasons.contains(where: { generalError.contains($0) }) else { return generalError }
+        let batchWide = candidates.count > 1 && reasons.count == candidates.count
+            && Set(reasons).count == 1
+        return batchWide ? generalError : nil
+    }
+
+    /// Cards the last Start left staged because the queue-edge check gave
+    /// them a name the operator had not seen yet.
+    private var renamedAtLastStart = 0
+
+    /// One line for the cards a Start left in the batch.
+    var heldBackLine: String? {
+        if renamedAtLastStart > 0 {
+            return (renamedAtLastStart == 1
+                    ? "1 card got a new name at the last check and stayed in the batch."
+                    : "\(renamedAtLastStart) cards got a new name at the last check and stayed in the batch.")
+                + " Check the names and press Start again."
+        }
+        let refused = refusedCards
+        guard let first = refused.first else { return nil }
+        return refused.count == 1
+            ? "\(first.name) stayed in the batch: \(first.reason)"
+            : "\(refused.count) cards stayed in the batch. \(first.name): \(first.reason)"
+    }
+
     /// Cards not yet Ready: pending, waiting, inspecting, or refused.
     var notReadyCount: Int {
         candidates.count - readyCount
@@ -216,6 +274,11 @@ final class BatchSourceStagingModel: ObservableObject {
     func addCandidates(paths: [String], appModel: AppModel) {
         let existing = Set(candidates.map(\.path))
         var seen = existing
+        // A card with a queued or running job is not a candidate. The rail
+        // drop already refuses it; the folder pickers used to let it in, and
+        // the preflight then refused every card in the list (issue #24).
+        let copying = Set(appModel.jobs.filter(\.isRunning).map(\.sourcePath))
+        var leftOut: [String] = []
         for original in paths {
             let normalized = StandardPurePathNormalizer.normalize(
                 original.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -223,10 +286,27 @@ final class BatchSourceStagingModel: ObservableObject {
                 continue
             }
             seen.insert(normalized)
+            if copying.contains(normalized) {
+                leftOut.append(LooseSourceStaging.displayName(for: normalized)
+                    ?? LooseSourceStaging.templateVolumeName(for: normalized))
+                continue
+            }
             candidates.append(BatchSourceCandidate(path: normalized, originalPath: original))
         }
         generalError = nil
+        notice = Self.alreadyCopyingNotice(leftOut)
         if !candidates.isEmpty { startSerialInspection(appModel: appModel) }
+    }
+
+    /// "A001 is already copying, so it was not added."
+    static func alreadyCopyingNotice(_ names: [String]) -> String? {
+        switch names.count {
+        case 0: return nil
+        case 1: return "\(names[0]) is already copying, so it was not added."
+        default:
+            let list = names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
+            return "\(list) are already copying, so they were not added."
+        }
     }
 
     func removeCandidate(id: UUID, appModel: AppModel) {
@@ -234,6 +314,7 @@ final class BatchSourceStagingModel: ObservableObject {
         inspectionTask = nil
         candidates.removeAll { $0.id == id }
         generalError = nil
+        notice = nil
         if !candidates.isEmpty {
             startSerialInspection(appModel: appModel)
         } else {
@@ -268,6 +349,7 @@ final class BatchSourceStagingModel: ObservableObject {
         isInspecting = false
         candidates.removeAll()
         generalError = nil
+        notice = nil
     }
 
     /// Re-check cheap, non-mutating facts after the sheet appears or a label
@@ -302,6 +384,12 @@ final class BatchSourceStagingModel: ObservableObject {
             // never leave lanes from the previous context visible while the
             // new one is being validated.
             candidate.projectedLanes = []
+            if let reason = candidate.preflightRefusal {
+                candidate.status = .refused(reason)
+                candidate.renameNote = nil
+                firstError = firstError ?? (candidate.displayName + ": " + reason)
+                continue
+            }
             guard let pin = candidate.identityPin,
                   let inspection = candidate.inspection else {
                 if case .ready = candidate.status { candidate.status = .pending }
@@ -448,10 +536,6 @@ final class BatchSourceStagingModel: ObservableObject {
         return TemplateRenderer.validate(template, context: context)
     }
 
-    /// One all-or-nothing protocol-3 preflight for the complete candidate set.
-    /// The inspector is a detached value and the result is applied only if
-    /// this run's generation is still current, so stale cards cannot leak into
-    /// a later batch.
     /// Sources the preflight's overlap gate treats as active. The CURRENTLY
     /// STAGED source counts too: a batch candidate inside it could otherwise
     /// queue and run concurrently with the manual job for its parent (codex
@@ -482,7 +566,17 @@ final class BatchSourceStagingModel: ObservableObject {
         objectWillChange.send()
     }
 
+    /// The protocol-3 preflight for the staged cards. The core checks one
+    /// set of cards all-or-nothing; when it refuses over a single card
+    /// (pulled, unreadable, inside a card that is copying), that card is
+    /// held out with its reason and the rest are checked again without it.
+    /// The inspector is a detached value and the result is applied only if
+    /// this run's generation is still current, so stale cards cannot leak
+    /// into a later batch.
     func startSerialInspection(appModel: AppModel) {
+        // A card that started copying since it was staged is no longer a
+        // candidate; left in, it overlaps its own job and is refused.
+        dropCandidatesAlreadyCopying(appModel: appModel)
         guard !candidates.isEmpty else { return }
         guard !appModel.destinationPaths.isEmpty else {
             holdForDestinations()
@@ -493,7 +587,10 @@ final class BatchSourceStagingModel: ObservableObject {
         let runGeneration = generation
         isInspecting = true
         generalError = nil
-        candidates.forEach { $0.status = .inspecting }
+        candidates.forEach {
+            $0.status = .inspecting
+            $0.preflightRefusal = nil
+        }
 
         let paths = candidates.map(\.path)
         let roots = appModel.destinationPaths
@@ -526,22 +623,23 @@ final class BatchSourceStagingModel: ObservableObject {
                 template: template, project: project)
         }
         inspectionTask = Task { [weak self] in
-            do {
-                let staged = try await core.stageBatch(
-                    candidateSourcePaths: paths,
+            let outcome = await Self.preflightHoldingOutRefusedCards(paths: paths) { remaining in
+                try await core.stageBatch(
+                    candidateSourcePaths: remaining,
                     destinationRoots: roots,
                     existingActiveSourcePaths: activeSources,
                     laneBase: laneBase
                 )
-                guard !Task.isCancelled, let self, self.generation == runGeneration else { return }
-                self.applySuccessfulPreflight(staged, appModel: appModel)
-            } catch {
-                guard !Task.isCancelled, let self, self.generation == runGeneration else { return }
+            }
+            guard !Task.isCancelled, let self, self.generation == runGeneration else { return }
+            switch outcome {
+            case let .checked(staged, heldOut):
+                self.applyPreflight(staged, heldOut: heldOut, appModel: appModel)
+            case .failed(let message):
                 self.isInspecting = false
-                let message = (error as? BatchSourceStagingError)?.description
-                    ?? "Batch source preflight failed."
                 self.generalError = message
                 self.candidates.forEach {
+                    $0.preflightRefusal = message
                     $0.status = .refused(message)
                     $0.projectedLanes = []
                 }
@@ -550,6 +648,82 @@ final class BatchSourceStagingModel: ObservableObject {
         }
     }
 
+    enum PreflightOutcome {
+        /// The cards that passed, and the ones held out with their reasons.
+        case checked([BatchStagedSourceItem], heldOut: [String: String])
+        /// A refusal that is not about one card (timeout, engine mismatch).
+        case failed(String)
+    }
+
+    /// Runs `stage` on the cards, and again without the offending card each
+    /// time it refuses over one. Every pass removes a card, so it ends.
+    static func preflightHoldingOutRefusedCards(
+        paths: [String],
+        stage: ([String]) async throws -> [BatchStagedSourceItem]
+    ) async -> PreflightOutcome {
+        var remaining = paths
+        var heldOut: [String: String] = [:]
+        while !remaining.isEmpty {
+            do {
+                return .checked(try await stage(remaining), heldOut: heldOut)
+            } catch {
+                let stagingError = error as? BatchSourceStagingError
+                guard let stagingError,
+                      let refusal = cardRefusal(for: stagingError),
+                      remaining.contains(refusal.path) else {
+                    return .failed(stagingError?.description ?? "Batch source preflight failed.")
+                }
+                heldOut[refusal.path] = refusal.reason
+                remaining.removeAll { $0 == refusal.path }
+            }
+        }
+        return .checked([], heldOut: heldOut)
+    }
+
+    /// The one card a preflight refusal is about, and a short reason for
+    /// its row. Nil for refusals about the whole batch.
+    nonisolated static func cardRefusal(for error: BatchSourceStagingError) -> (path: String, reason: String)? {
+        func name(_ path: String) -> String {
+            LooseSourceStaging.displayName(for: path) ?? (path as NSString).lastPathComponent
+        }
+        switch error {
+        case let .sourceNotFound(path):
+            return (path, "source is no longer there; reconnect it and press Re-check")
+        case let .sourceNotDirectory(path):
+            return (path, "source is not a folder")
+        case let .sourceIsSymlink(path):
+            return (path, "source is a symbolic link, which cannot be copied from")
+        case let .sourceIdentityChanged(path):
+            return (path, "source was removed or replaced while it was being read")
+        case let .inspectionFailed(path, message):
+            return (path, "card could not be read: " + message)
+        case let .inspectionMetadataOutOfBounds(path):
+            return (path, "card details were too large to read")
+        case let .invalidPath(path, reason):
+            return (path, "path cannot be used: " + reason)
+        case let .pathLengthExceeded(path, _, _):
+            return (path, "path is too long")
+        case let .emptyLabel(path):
+            return (path, "no card name could be read; type one and press Re-check")
+        case let .duplicateCandidatePin(_, firstSource, secondSource):
+            return (secondSource, "is the same folder as " + name(firstSource))
+        case let .mutualSourceOverlap(source1, source2):
+            return (source2, "overlaps " + name(source1) + ": one is inside the other")
+        case let .sourceDestinationOverlap(source, destination):
+            return (source, "overlaps the destination " + name(destination))
+        case let .activeSourceOverlap(source, activeSource):
+            return (source, "overlaps " + name(activeSource) + ", which is staged or copying")
+        case .emptyCandidates, .emptyDestinations, .candidateLimitExceeded,
+             .labelLengthExceeded, .invalidLabel, .duplicateCandidatePath,
+             .duplicateLabel, .destinationLaneCollision, .existingDestinationLaneConflict,
+             .protocolMismatch, .timeout, .cancelled:
+            return nil
+        }
+    }
+
+    /// Queue every Ready card. Cards that are not Ready stay staged with
+    /// their reason, and `generalError` names the first one. Fails only when
+    /// no card can start.
     @discardableResult
     func queueBatch(appModel: AppModel) -> Result<[Job], BatchQueueError> {
         // Start is gated on the cards, not the banner. A message from an
@@ -559,37 +733,50 @@ final class BatchSourceStagingModel: ObservableObject {
         labelRevalidation?.cancel()
         labelRevalidation = nil
         generalError = nil
+        notice = nil
+        renamedAtLastStart = 0
         dropCandidatesAlreadyCopying(appModel: appModel)
         // Every card was already copying: nothing left to start.
         if candidates.isEmpty { return .success([]) }
-        guard canQueueBatch else {
-            let error = BatchQueueError.notReady
+        guard !appModel.destinationPaths.isEmpty else {
+            let error = BatchQueueError.preflightFailed("Select at least one destination before queueing the batch.")
             generalError = error.description
             return .failure(error)
         }
-        guard !appModel.destinationPaths.isEmpty else {
-            let error = BatchQueueError.preflightFailed("Select at least one destination before queueing the batch.")
+        guard !isInspecting else {
+            let error = BatchQueueError.notReady
             generalError = error.description
             return .failure(error)
         }
 
         // Re-check identity and labels at the exact queue edge. A card can be
         // removed/reinserted after inspection; no stale metadata may become a
-        // persisted job merely because the UI still says Ready.
-        let namesShown = candidates.map(\.effectiveLabel)
+        // persisted job merely because the UI still says Ready. Only a card
+        // that was Ready before this check and still is can start: the
+        // operator saw its name.
+        let namesShown = Dictionary(uniqueKeysWithValues: candidates
+            .filter { $0.status == .ready }.map { ($0.id, $0.effectiveLabel) })
         revalidateAll(appModel: appModel)
-        guard canQueueBatch else {
-            let error = BatchQueueError.preflightFailed(
-                generalError ?? "Batch preflight changed; re-inspect before queueing."
-            )
+        let stillReady = candidates.filter { $0.status == .ready && namesShown[$0.id] != nil }
+        guard !stillReady.isEmpty else {
+            let error = namesShown.isEmpty && generalError == nil
+                ? BatchQueueError.notReady
+                : BatchQueueError.preflightFailed(
+                    generalError ?? "Batch preflight changed; re-inspect before queueing.")
+            generalError = error.description
             return .failure(error)
         }
         // The re-check can renumber an automatic name (a folder appeared on
-        // the destination meanwhile). Never queue a folder name the operator
-        // did not see; show the new one and let them press Start again.
-        guard candidates.map(\.effectiveLabel) == namesShown else {
+        // the destination meanwhile, or the card holding the plain name was
+        // just refused). Never queue a folder name the operator did not see:
+        // that card stays staged under its new name for the next Start, and
+        // the cards whose names held still go (Sol review, 2026-11-11: one
+        // renumbered card used to stop them all).
+        let startable = stillReady.filter { namesShown[$0.id] == $0.effectiveLabel }
+        renamedAtLastStart = stillReady.count - startable.count
+        guard !startable.isEmpty else {
             let error = BatchQueueError.preflightFailed(
-                "A card name changed because the destination changed. Check the names and press Start again.")
+                "A card name changed at the last check. Check the names and press Start again.")
             generalError = error.description
             return .failure(error)
         }
@@ -598,12 +785,10 @@ final class BatchSourceStagingModel: ObservableObject {
         let defaults = UserDefaults.standard
         let project = defaults.string(forKey: Pref.projectName) ?? ""
         var planPairs: [(candidate: BatchSourceCandidate, plan: AppModel.LaunchPlan)] = []
-        for candidate in candidates {
-            guard let inspection = candidate.inspection else {
-                let error = BatchQueueError.notReady
-                generalError = error.description
-                return .failure(error)
-            }
+        var planRefusals: [(candidate: BatchSourceCandidate, reason: String)] = []
+        for candidate in startable {
+            // revalidateAll never leaves a card Ready without its inspection.
+            guard let inspection = candidate.inspection else { continue }
             let label = candidate.effectiveLabel
             let jobID = String(UUID().uuidString.prefix(8)).uppercased()
             let context = TemplateContext(
@@ -624,31 +809,56 @@ final class BatchSourceStagingModel: ObservableObject {
                 context: context
             ) {
             case .failure(let error):
-                let batchError = BatchQueueError.planFailed(error.message)
-                generalError = batchError.description
-                return .failure(batchError)
+                planRefusals.append((candidate, error.message))
             case .success(let plan):
                 planPairs.append((candidate: candidate, plan: plan))
             }
         }
+        func markPlanRefusals() {
+            for refusal in planRefusals { refusal.candidate.status = .refused(refusal.reason) }
+            if let first = planRefusals.first { generalError = generalError ?? first.reason }
+        }
+        guard !planPairs.isEmpty else {
+            markPlanRefusals()
+            let error = BatchQueueError.planFailed(
+                planRefusals.first?.reason ?? BatchQueueError.notReady.description)
+            generalError = error.description
+            return .failure(error)
+        }
 
         let result = appModel.queueBatch(plans: planPairs)
-        if case .success = result {
-            candidates.removeAll()
+        switch result {
+        case .success:
+            let queued = Set(planPairs.map { $0.candidate.id })
+            candidates.removeAll { queued.contains($0.id) }
             generalError = nil
-        } else if case .failure(let error) = result {
+            // The cards left behind are named against the folders the new
+            // jobs now hold, and keep their reasons.
+            if !candidates.isEmpty { revalidateAll(appModel: appModel) }
+            markPlanRefusals()
+            if renamedAtLastStart > 0 { generalError = heldBackLine }
+        case .failure(let error):
+            markPlanRefusals()
             generalError = error.description
         }
         return result
     }
 
-    private func applySuccessfulPreflight(_ staged: [BatchStagedSourceItem], appModel: AppModel) {
-        let byPath = Dictionary(uniqueKeysWithValues: staged.map { ($0.normalizedSourcePath, $0) })
+    /// Apply a finished preflight: cards that passed take their inspection,
+    /// cards held out take their reason. Package visibility for the checks.
+    func applyPreflight(_ staged: [BatchStagedSourceItem], heldOut: [String: String] = [:],
+                        appModel: AppModel) {
+        let byPath = Dictionary(staged.map { ($0.normalizedSourcePath, $0) },
+                                uniquingKeysWith: { first, _ in first })
         for candidate in candidates {
             guard let item = byPath[candidate.path] else {
-                candidate.status = .refused("source was not returned by preflight")
+                let reason = heldOut[candidate.path] ?? "source was not returned by preflight"
+                candidate.preflightRefusal = reason
+                candidate.status = .refused(reason)
+                candidate.projectedLanes = []
                 continue
             }
+            candidate.preflightRefusal = nil
             // suggestedLabel is the engine's own suggestion, not the name the
             // preflight picked: revalidateAll numbers automatic names from
             // it, so a card gets its plain name back when the clash goes.

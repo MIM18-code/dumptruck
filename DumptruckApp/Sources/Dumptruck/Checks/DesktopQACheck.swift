@@ -709,8 +709,204 @@ enum DesktopQACheck {
         require(stranger.renameNote == BatchLabelAllocator.renameNote(
                     from: "NO NAME", to: "NO NAME_2", reason: .folderTaken(lanePath: noNameLane)),
                 "the known card says why it moved")
+
+        // ---- Issue #25 (2026-11-11): one refused card does not hold back
+        // the Ready ones. Start copies every Ready card and the refused one
+        // stays staged with its reason.
+        model.pauseDispatch()   // queued jobs stay queued: no engine runs here
+        let savedBatchModel = model.batchStagingModel
+        let partial = BatchSourceStagingModel()
+        partial.cardRegistry = { [] }
+        model.batchStagingModel = partial
+        let partialCards = try ["PARTIAL_A", "PARTIAL_B", "PARTIAL_PULLED"].map { try sameNameCard($0) }
+        for card in partialCards { card.seedAutomaticLabel((card.path as NSString).lastPathComponent) }
+        partialCards[0].customLabel = "CAM_A"
+        partialCards[1].customLabel = "CAM_B"
+        partial.candidates = partialCards
+        partial.revalidateAll(appModel: model)
+        require(partialCards.allSatisfy { $0.status == .ready }, "three cards start Ready: \(partialCards.map(\.status))")
+        // The third card is pulled after it was read.
+        try fm.removeItem(atPath: partialCards[2].path)
+        partial.revalidateAll(appModel: model)
+        require(partialCards[2].status == .refused("source was removed, replaced, or became a symlink"),
+                "the pulled card is refused: \(partialCards[2].status)")
+        require(partial.canStartReadyCards && !partial.cardsReadyToQueue,
+                "two Ready cards can start beside a refused one")
+        if model.engineConfigurationError == nil {
+            require(model.batchStartBlockedReason == nil,
+                    "Start Offload is not blocked by the refused card: \(model.batchStartBlockedReason ?? "nil")")
+        }
+        switch partial.queueBatch(appModel: model) {
+        case .success(let started):
+            require(started.map(\.label) == ["CAM_A", "CAM_B"],
+                    "the Ready cards are queued under their names: \(started.map(\.label))")
+            require(started.allSatisfy { $0.phase == .queued }, "they wait in the queue while dispatch is paused")
+        case .failure(let error):
+            require(false, "a batch with Ready cards must start: \(error)")
+        }
+        require(partial.candidates.map(\.path) == [partialCards[2].path],
+                "only the refused card stays staged: \(partial.candidates.map(\.displayName))")
+        require(partial.refusedCards.count == 1 && partial.generalError != nil,
+                "the card left behind keeps its reason: \(partial.generalError ?? "nil")")
+        require(partial.heldBackLine == "PARTIAL_PULLED stayed in the batch: "
+                    + "source was removed, replaced, or became a symlink",
+                "one line says which card stayed and why: \(partial.heldBackLine ?? "nil")")
+        // With nothing Ready, Start says so and queues nothing more.
+        let queuedSoFar = model.jobs.count
+        if model.engineConfigurationError == nil {
+            require(model.batchStartBlockedReason == "The card in the batch can't start — Review Batch shows why",
+                    "a batch of one refused card explains itself: \(model.batchStartBlockedReason ?? "nil")")
+        }
+        if case .success = partial.queueBatch(appModel: model) {
+            require(false, "a batch with no Ready card must not report a start")
+        }
+        require(model.jobs.count == queuedSoFar, "nothing was queued for the refused card")
+        partial.cancelStaging()
+
+        // A card Ready only since the edge re-check was never shown Ready,
+        // so it waits for the next Start; the cards shown Ready still go.
+        let lateCards = try ["LATE_A", "LATE_B"].map { try sameNameCard($0) }
+        lateCards[0].customLabel = "LATE_A"
+        lateCards[1].customLabel = "   "
+        partial.candidates = lateCards
+        partial.revalidateAll(appModel: model)
+        require(lateCards[0].status == .ready && lateCards[1].status == .refused("Card label cannot be empty."),
+                "one Ready, one with an empty name: \(lateCards.map(\.status))")
+        lateCards[1].customLabel = "LATE_B"   // typed, not yet re-checked
+        if case .success(let started) = partial.queueBatch(appModel: model) {
+            require(started.map(\.label) == ["LATE_A"], "only the card shown Ready starts: \(started.map(\.label))")
+        } else {
+            require(false, "the Ready card must start")
+        }
+        require(partial.candidates.map(\.path) == [lateCards[1].path] && lateCards[1].status == .ready,
+                "the renamed card stays, now Ready, for the next Start: \(lateCards[1].status)")
+        partial.cancelStaging()
+
+        // A pulled card can free the plain name a numbered card was stepping
+        // around. The renumbered card waits for the next Start, since its
+        // new name was never shown, and the card whose name held still goes
+        // (Sol review, 2026-11-11: one renumbered card used to stop them all).
+        let renumber = try ["RENUMBER_A", "RENUMBER_B", "RENUMBER_C"].map { try sameNameCard($0) }
+        renumber[2].customLabel = "CAM_C"
+        partial.candidates = renumber
+        partial.revalidateAll(appModel: model)
+        require(renumber.map(\.effectiveLabel) == ["NO NAME", "NO NAME_2", "CAM_C"],
+                "two same-name cards and a typed one: \(renumber.map(\.effectiveLabel))")
+        try fm.removeItem(atPath: renumber[0].path)   // pulled; nothing re-checked yet
+        if case .success(let started) = partial.queueBatch(appModel: model) {
+            require(started.map(\.label) == ["CAM_C"],
+                    "the card whose name held starts: \(started.map(\.label))")
+        } else {
+            require(false, "a renumbered card must not stop the others: \(partial.generalError ?? "nil")")
+        }
+        require(partial.candidates.map(\.path) == [renumber[0].path, renumber[1].path],
+                "the pulled card and the renumbered card stay staged")
+        require(renumber[1].status == .ready && renumber[1].effectiveLabel == "NO NAME",
+                "the renumbered card shows its new name: \(renumber[1].status) \(renumber[1].effectiveLabel)")
+        require(partial.heldBackLine == "1 card got a new name at the last check and stayed in the batch. "
+                    + "Check the names and press Start again."
+                    && partial.generalError == partial.heldBackLine,
+                "the operator is told why it stayed: \(partial.heldBackLine ?? "nil")")
+        if case .success(let started) = partial.queueBatch(appModel: model) {
+            require(started.map(\.label) == ["NO NAME"], "the next Start sends it under the name shown: \(started.map(\.label))")
+        } else {
+            require(false, "the renumbered card starts on the next press")
+        }
+        partial.cancelStaging()
+
+        // ---- Issue #24 (2026-11-11): the preflight holds out the one card
+        // it refuses over and checks the others again without it.
+        let overlapCard = "/Volumes/A001/DCIM"
+        let cleanCards = ["/Volumes/B002", "/Volumes/C003"]
+        var stagedSets: [[String]] = []
+        let heldOne = await BatchSourceStagingModel.preflightHoldingOutRefusedCards(
+            paths: [cleanCards[0], overlapCard, cleanCards[1]]) { remaining in
+            stagedSets.append(remaining)
+            if remaining.contains(overlapCard) {
+                throw BatchSourceStagingError.activeSourceOverlap(source: overlapCard, activeSource: "/Volumes/A001")
+            }
+            return []
+        }
+        if case let .checked(_, heldOut) = heldOne {
+            require(heldOut == [overlapCard: "overlaps A001, which is staged or copying"],
+                    "only the overlapping card is held out, with its reason: \(heldOut)")
+        } else {
+            require(false, "a refusal about one card must not fail the batch")
+        }
+        require(stagedSets == [[cleanCards[0], overlapCard, cleanCards[1]], cleanCards],
+                "the other cards are checked again without it: \(stagedSets)")
+        let wholeBatch = await BatchSourceStagingModel.preflightHoldingOutRefusedCards(paths: cleanCards) { _ in
+            throw BatchSourceStagingError.timeout(seconds: 5)
+        }
+        if case .failed(let message) = wholeBatch {
+            require(message == BatchSourceStagingError.timeout(seconds: 5).description,
+                    "a refusal about the whole batch still fails it")
+        } else {
+            require(false, "a timeout is not one card's fault")
+        }
+        let everyCard = await BatchSourceStagingModel.preflightHoldingOutRefusedCards(paths: cleanCards) { remaining in
+            throw BatchSourceStagingError.sourceNotFound(path: remaining[0])
+        }
+        if case let .checked(staged, heldOut) = everyCard {
+            require(staged.isEmpty && Set(heldOut.keys) == Set(cleanCards), "every card can be held out; the loop ends")
+        } else {
+            require(false, "held-out cards are not a batch failure")
+        }
+        require(BatchSourceStagingModel.cardRefusal(for: .protocolMismatch(expected: 3, actual: 2, path: "/x")) == nil,
+                "an engine mismatch is not one card's fault")
+
+        // A held-out card keeps its refusal through label edits; the cards
+        // that passed are Ready beside it.
+        let heldCards = try ["HELD_GOOD", "HELD_OUT"].map { try sameNameCard($0) }
+        partial.candidates = heldCards
+        partial.applyPreflight(
+            [BatchStagedSourceItem(
+                originalPath: heldCards[0].path, normalizedSourcePath: heldCards[0].path,
+                label: "HELD_GOOD", identityPin: heldCards[0].identityPin!,
+                metadata: CardInspectionMetadata(label: "HELD_GOOD", totalBytes: 1, fileCount: 1,
+                                                 customProperties: [:], previousDestinations: [],
+                                                 datasetID: nil),
+                destinationLanes: [])],
+            heldOut: [heldCards[1].path: "overlaps A001, which is staged or copying"],
+            appModel: model)
+        require(heldCards[0].status == .ready && heldCards[0].effectiveLabel == "HELD_GOOD",
+                "the card that passed is Ready: \(heldCards[0].status)")
+        require(heldCards[1].status == .refused("overlaps A001, which is staged or copying"),
+                "the held-out card says why: \(heldCards[1].status)")
+        partial.updateLabel(id: heldCards[1].id, newLabel: "RENAMED", appModel: model)
+        require(heldCards[1].status == .refused("overlaps A001, which is staged or copying"),
+                "a label edit does not make a held-out card Ready: \(heldCards[1].status)")
+        require(partial.canStartReadyCards, "the batch can start without the held-out card")
+        partial.cancelStaging()
+        model.jobs = []
+        model.resumeDispatch()
+        model.batchStagingModel = savedBatchModel
         defaults.set(namingTemplate, forKey: Pref.folderTemplate)
         model.unassignDestination(nameDest)
+
+        // ---- Issue #24: a card that is already copying cannot be added
+        // through the folder pickers. No destination is staged here, so the
+        // added card waits and no engine read starts.
+        let pickerCopying = root.appendingPathComponent("PICKER_COPYING").path
+        let pickerFresh = root.appendingPathComponent("PICKER_FRESH").path
+        try fm.createDirectory(atPath: pickerCopying, withIntermediateDirectories: true)
+        try fm.createDirectory(atPath: pickerFresh, withIntermediateDirectories: true)
+        let pickerJob = Job(label: "PICKER_COPYING", sourcePath: pickerCopying, destinations: ["/dest"])
+        pickerJob.phase = .queued
+        model.jobs = [pickerJob]
+        let picker = BatchSourceStagingModel()
+        picker.addCandidates(paths: [pickerCopying, pickerFresh], appModel: model)
+        require(picker.candidates.map(\.path) == [pickerFresh],
+                "the copying card is left out of the batch: \(picker.candidates.map(\.path))")
+        require(picker.notice == "PICKER_COPYING is already copying, so it was not added.",
+                "the window says which card was left out: \(picker.notice ?? "nil")")
+        require(picker.candidates[0].status == .awaitingDestinations && picker.generalError == nil,
+                "the other card waits for destinations, not refused: \(picker.candidates[0].status)")
+        require(BatchSourceStagingModel.alreadyCopyingNotice(["A001", "B002", "C003"])
+                    == "A001, B002 and C003 are already copying, so they were not added.",
+                "several left-out cards read as one sentence")
+        picker.cancelStaging()
+        model.jobs = []
 
         // ---- R3-05: the eject control's visibility predicate.
         let usbFixed = Volume(path: "/Volumes/QA_USB", name: "QA_USB", isEjectable: false,

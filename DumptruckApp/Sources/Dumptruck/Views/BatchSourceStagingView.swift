@@ -22,7 +22,7 @@ public struct BatchSourceStagingView: View {
             header
             Divider()
 
-            if let generalErr = stagingModel.generalError {
+            if let generalErr = stagingModel.bannerError {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(Semantics.dangerText)
@@ -34,6 +34,30 @@ public struct BatchSourceStagingView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
                 .background(Semantics.danger.opacity(Semantics.wash))
+                Divider()
+            }
+
+            if let notice = stagingModel.notice {
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle.fill")
+                        .foregroundStyle(.secondary)
+                    Text(notice)
+                        .font(Typo.safetyBody)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        stagingModel.notice = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(HoverHighlightButtonStyle())
+                    .foregroundStyle(.secondary)
+                    .help("Dismiss this message")
+                    .accessibilityLabel("Dismiss message")
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(.background.secondary)
                 Divider()
             }
 
@@ -133,7 +157,7 @@ public struct BatchSourceStagingView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Batch Sources")
                     .font(.headline.weight(.semibold))
-                Text("Every card is inspected before anything starts. Keep dropping cards here or on the rail.")
+                Text("Every card is inspected before it starts. Keep dropping cards here or on the rail.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -156,9 +180,10 @@ public struct BatchSourceStagingView: View {
     private var summaryBar: some View {
         HStack(spacing: 20) {
             Label("\(stagingModel.readyCount) of \(stagingModel.candidates.count) Ready",
-                  systemImage: stagingModel.canQueueBatch ? "checkmark.circle.fill" : "clock.fill")
+                  systemImage: stagingModel.cardsReadyToQueue ? "checkmark.circle.fill"
+                      : (stagingModel.isInspecting ? "clock.fill" : "circle.lefthalf.filled"))
                 .font(.callout.weight(.medium))
-                .foregroundStyle(stagingModel.canQueueBatch ? Semantics.successText : .secondary)
+                .foregroundStyle(stagingModel.cardsReadyToQueue ? Semantics.successText : .secondary)
 
             // One slow or unreadable card used to refuse the pile with no way
             // back short of removing and re-adding cards (Joshua, 2026-09-28).
@@ -259,14 +284,17 @@ public struct BatchSourceStagingView: View {
             Button(startTitle) {
                 switch stagingModel.queueBatch(appModel: model) {
                 case .success:
-                    dismiss()
+                    // A card that could not start stays listed with its
+                    // reason, so the window stays with it.
+                    if stagingModel.candidates.isEmpty { dismiss() }
                 case .failure:
                     break
                 }
             }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut(.return, modifiers: .command)
-            .disabled(!stagingModel.cardsReadyToQueue)
+            .disabled(!stagingModel.canStartReadyCards)
+            .help(startHelp)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -282,8 +310,23 @@ public struct BatchSourceStagingView: View {
         if stagingModel.cardsReadyToQueue {
             return total == 1 ? "Start 1 Card" : "Start \(total) Cards"
         }
+        // Some Ready, some not: Start copies the Ready ones and says so.
+        if stagingModel.canStartReadyCards {
+            let ready = stagingModel.readyCount
+            return ready == 1 ? "Start 1 Ready Card" : "Start \(ready) Ready Cards"
+        }
+        if !stagingModel.isInspecting, stagingModel.hasRefusedCard {
+            return "No Card Ready"
+        }
         let waiting = max(stagingModel.notReadyCount, 1)
         return waiting == 1 ? "Waiting on 1 card…" : "Waiting on \(waiting) cards…"
+    }
+
+    private var startHelp: String {
+        if stagingModel.canStartReadyCards, !stagingModel.cardsReadyToQueue {
+            return "Copies the Ready cards. The others stay here with their reasons."
+        }
+        return "Copy + verify every card (\u{2318}Return)"
     }
 
     private var clearMessage: String {
@@ -358,10 +401,11 @@ struct BatchCandidateRow: View {
                     }
 
                     HStack(spacing: 8) {
-                        Text("Card Label:")
+                        // "Card name", the bench's words for the same field.
+                        Text("Card name")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        TextField("Label", text: $candidate.customLabel)
+                        TextField("Card name", text: $candidate.customLabel)
                             .textFieldStyle(.roundedBorder)
                             .font(.callout.monospaced())
                             .frame(maxWidth: 240)
@@ -411,7 +455,7 @@ struct BatchCandidateRow: View {
 
                     if !candidate.projectedLanes.isEmpty {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Target Lanes:")
+                            Text("Copies to")
                                 .font(.caption2.weight(.medium))
                                 .foregroundStyle(.tertiary)
                             ForEach(candidate.projectedLanes, id: \.self) { lane in

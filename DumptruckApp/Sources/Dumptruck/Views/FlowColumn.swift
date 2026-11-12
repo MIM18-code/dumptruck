@@ -68,12 +68,13 @@ struct FlowColumn: View {
             }
             let clearable = shownLiveJobs.filter(LiveJobClearing.isClearable)
             if model.sourcePath == nil && shownLiveJobs.isEmpty {
-                EmptyFlowState()
+                IdleStage(staging: model.batchStagingModel)
             } else {
                 if model.sourcePath != nil {
                     BenchCard()
                         .padding(.horizontal, 14).padding(.top, 12)
                 }
+                BatchBench(staging: model.batchStagingModel)
                 if let done = model.allDoneSummary {
                     allDoneStrip(done)
                 }
@@ -192,6 +193,214 @@ struct FlowColumn: View {
     }
 }
 
+/// The center with no card on the bench and no job: the welcome steps, or
+/// the staged batch. A batch used to leave "Insert a card" on the stage
+/// over three cards waiting on the rail (2026-11-11). Observes the batch
+/// model directly: its list changes without AppModel publishing.
+struct IdleStage: View {
+    @ObservedObject var staging: BatchSourceStagingModel
+
+    var body: some View {
+        if staging.candidates.isEmpty {
+            EmptyFlowState()
+        } else {
+            VStack(spacing: 0) {
+                BatchBenchCard(staging: staging)
+                    .padding(.horizontal, 14).padding(.top, 12)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+/// The batch card under the bench or above the job cards, when one is staged.
+struct BatchBench: View {
+    @ObservedObject var staging: BatchSourceStagingModel
+
+    var body: some View {
+        if !staging.candidates.isEmpty {
+            BatchBenchCard(staging: staging)
+                .padding(.horizontal, 14).padding(.top, 12)
+        }
+    }
+}
+
+/// What Start Offload will do with the batch, on the stage where the eye
+/// is: each card with its size and state, where the cards go, and the one
+/// line Start would answer with. The rail list stays the place to remove a
+/// card; names are changed in the batch window.
+struct BatchBenchCard: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var staging: BatchSourceStagingModel
+
+    private static let shownRows = 5
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "square.stack.3d.up").font(.title2)
+                    .foregroundStyle(Semantics.sourceText)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Batch — ^[\(staging.candidates.count) card](inflect: true)")
+                        .font(.headline)
+                    // Wraps at the narrow window: cut in the middle it read
+                    // "351 file…_A + SHUTTLE_B".
+                    Text(summary)
+                        .font(Typo.safetyBody)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button {
+                    model.openBatchWindow()
+                } label: {
+                    Label("Review Batch…", systemImage: "square.stack.3d.up")
+                }
+                .buttonStyle(.bordered)
+                .fixedSize()
+                .help("Check or change the card names and see where each card goes")
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(staging.candidates.prefix(Self.shownRows)) { candidate in
+                    BatchBenchRow(candidate: candidate)
+                }
+                if staging.candidates.count > Self.shownRows {
+                    Text("and \(staging.candidates.count - Self.shownRows) more in Review Batch")
+                        .font(Typo.evidence)
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 22)
+                }
+            }
+            footer
+        }
+        .padding(14)
+        .background(.background.secondary, in: .rect(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Staged batch")
+    }
+
+    private var summary: String {
+        var parts: [String] = []
+        if staging.totalCandidateBytes > 0 {
+            parts.append("\(bytesString(staging.totalCandidateBytes)) · \(fileCount(staging.totalCandidateFiles))")
+        }
+        if !model.destinationPaths.isEmpty {
+            parts.append("→ " + StartSummary.destinationNames(model))
+        }
+        return parts.isEmpty ? "Reading the cards…" : parts.joined(separator: " ")
+    }
+
+    /// Same voice as the bench footer: the next step quietly, a problem in
+    /// the warning color, and a plain line when Start would run.
+    @ViewBuilder
+    private var footer: some View {
+        if let reason = model.batchStartBlockedReason {
+            if AppModel.isNextStepReason(reason) || reason.hasPrefix(AppModel.batchWaitingPrefix) {
+                Label(reason, systemImage: "info.circle")
+                    .font(Typo.safety)
+                    .foregroundStyle(.secondary)
+            } else {
+                Label(reason, systemImage: "exclamationmark.triangle.fill")
+                    .font(Typo.safety)
+                    .foregroundStyle(Semantics.warningText)
+            }
+        } else {
+            Label(readyLine, systemImage: "checkmark.circle")
+                .font(Typo.safety)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var readyLine: String {
+        let ready = staging.readyCount
+        let held = staging.candidates.count - ready
+        if held == 0 {
+            return ready == 1 ? "Ready. Start Offload copies this card."
+                              : "Ready. Start Offload copies all \(ready) cards."
+        }
+        let going = ready == 1 ? "the 1 ready card" : "the \(ready) ready cards"
+        let staying = held == 1 ? "The other stays here." : "The other \(held) stay here."
+        return "Start Offload copies \(going). \(staying)"
+    }
+}
+
+private struct BatchBenchRow: View {
+    @ObservedObject var candidate: BatchSourceCandidate
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: candidate.path.hasPrefix("/Volumes/") ? "sdcard.fill" : "folder.fill")
+                .imageScale(.small)
+                .foregroundStyle(Semantics.sourceText)
+                .frame(width: 14)
+            Text(name)
+                .font(.callout.weight(.medium))
+                .lineLimit(1).truncationMode(.middle)
+            if let ins = candidate.inspection {
+                Text("\(ins.formatName) · \(fileCount(ins.files)) · \(bytesString(ins.bytes))")
+                    .font(Typo.evidenceQuiet.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .layoutPriority(-1)
+            }
+            Spacer(minLength: 8)
+            status
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The card's own name, and the name it copies under when that differs
+    /// ("NO NAME → NO NAME_2").
+    private var name: String {
+        let label = candidate.effectiveLabel
+        guard candidate.status == .ready, !label.isEmpty, label != candidate.displayName else {
+            return candidate.displayName
+        }
+        return "\(candidate.displayName) → \(label)"
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        switch candidate.status {
+        case .pending, .inspecting:
+            HStack(spacing: 5) {
+                ProgressView().controlSize(.mini)
+                Text("Reading…")
+            }
+            .font(Typo.evidence).foregroundStyle(.secondary)
+        case .awaitingDestinations:
+            Label("Waiting for destinations", systemImage: "hourglass")
+                .font(Typo.evidence).foregroundStyle(.secondary)
+        case .ready:
+            Label("Ready", systemImage: "checkmark.circle.fill")
+                .font(Typo.evidence).foregroundStyle(Semantics.successText)
+        case .refused(let reason):
+            Label(reason, systemImage: "xmark.octagon.fill")
+                .font(Typo.evidence).foregroundStyle(Semantics.dangerText)
+                .lineLimit(2).multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 300, alignment: .trailing)
+        }
+    }
+}
+
+/// Plain-language pieces shared by the bench and the batch card.
+enum StartSummary {
+    /// "SHUTTLE_A + SHUTTLE_B", or a count once the names stop fitting.
+    @MainActor
+    static func destinationNames(_ model: AppModel) -> String {
+        let names = model.destinationPaths.map(model.endpointDisplayName)
+        return names.count <= 3 ? names.joined(separator: " + ") : "\(names.count) destinations"
+    }
+
+    static func destinationCount(_ n: Int) -> String {
+        n == 1 ? "1 destination" : "\(n) destinations"
+    }
+}
+
 struct EmptyFlowState: View {
     @EnvironmentObject var model: AppModel
 
@@ -213,9 +422,15 @@ struct EmptyFlowState: View {
                     .font(.title2.weight(.semibold))
             }
         } description: {
+            // The steps answer to what is already done: with drives on the
+            // rail, step 2 used to keep asking for them (2026-11-11).
+            let staged = model.destinationPaths.count
             VStack(alignment: .leading, spacing: 8) {
                 step(1, "Insert a card — it appears on the shelf below")
-                step(2, "Stage two drives as destinations")
+                step(2, staged == 0 ? "Stage two drives as destinations"
+                        : staged == 1 ? "1 destination staged. Add a second drive to clear cards"
+                        : "\(staged) destinations staged",
+                     done: staged >= 2)
                 step(3, "Name the card, then Start Offload")
             }
             .font(.callout)
@@ -229,13 +444,22 @@ struct EmptyFlowState: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func step(_ n: Int, _ text: String) -> some View {
+    private func step(_ n: Int, _ text: String, done: Bool = false) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text("\(n)").font(.caption.weight(.bold)).monospacedDigit()
-                .frame(width: 20, height: 20)
-                .background(.quaternary, in: .circle)
+            if done {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.body)
+                    .foregroundStyle(Semantics.successText)
+                    .frame(width: 20, height: 20)
+            } else {
+                Text("\(n)").font(.caption.weight(.bold)).monospacedDigit()
+                    .frame(width: 20, height: 20)
+                    .background(.quaternary, in: .circle)
+            }
             Text(text).foregroundStyle(.secondary)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(done ? "Step \(n), done: \(text)" : "Step \(n): \(text)")
     }
 }
 
@@ -744,9 +968,24 @@ struct BenchCard: View {
             PlannedLaneGroup()
             if let reason = model.startBlockedReason {
                 startBlockedFooter(reason)
+            } else if !model.startRunsBatch {
+                // The footer named every reason Start would refuse and went
+                // silent once nothing was wrong; now it says so. With a
+                // batch staged, the batch card speaks for Start.
+                Label(readyLine, systemImage: "checkmark.circle")
+                    .font(Typo.safety)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(14)
+    }
+
+    private var readyLine: String {
+        let to = StartSummary.destinationCount(model.destinationPaths.count)
+        if let bytes = model.inspection?.bytes, bytes > 0 {
+            return "Ready. Start Offload copies \(bytesString(bytes)) to \(to)."
+        }
+        return "Ready. Start Offload copies this card to \(to)."
     }
 
     /// Ordinary next steps ("Add at least one destination" right after a
@@ -1197,8 +1436,7 @@ struct JobHeaderBand: View {
             // completion the lanes have not shown (agy audit, MEDIUM 7).
             // Amber = copying; the verify re-read below keeps indigo — the
             // phase distinction the chrome carries (2026-08-26 facelift).
-            ProgressView(value: job.fraction)
-                .tint(Brand.amber)
+            PhaseBar(fraction: job.fraction, tint: Brand.amber)
             HStack(spacing: 10) {
                 // No rolling digits on any copy counter: at copy speed a
                 // roll never finishes, and screenshots caught "5_ / 129" and
@@ -1223,8 +1461,7 @@ struct JobHeaderBand: View {
             if showsSpeedRow { speedometerRow }
         } else if job.phase == .sourceVerify, job.rereadTotal > 0 {
             let frac = Double(job.rereadDone) / Double(job.rereadTotal)
-            ProgressView(value: frac)
-                .tint(Semantics.running)
+            PhaseBar(fraction: frac, tint: Semantics.running)
                 .overlay {
                     MilestoneTicksOverlay(fraction: frac)
                 }
@@ -1248,8 +1485,7 @@ struct JobHeaderBand: View {
         } else if job.phase == .reports {
             // Manifest/report sealing is genuinely indeterminate — the bar
             // must never sit pinned at 100% while safety work is underway.
-            ProgressView().progressViewStyle(.linear)
-                .tint(Semantics.running)
+            PhaseBar(fraction: nil, tint: Semantics.running)
             if simpleView && !job.reportFailed {
                 Text("Finishing up…")
                     .font(.caption).foregroundStyle(.secondary)
@@ -1257,8 +1493,7 @@ struct JobHeaderBand: View {
                 sealingChecklist
             }
         } else {
-            ProgressView().progressViewStyle(.linear)
-                .tint(Semantics.running)
+            PhaseBar(fraction: nil, tint: Semantics.running)
             Text(job.phase.rawValue)
                 .font(Typo.evidence).foregroundStyle(.secondary)
         }
@@ -1649,8 +1884,6 @@ struct JobHeaderBand: View {
             ejectLabel: ejectableSourceLabel,
             reportPath: shownReportPath,
             canRetry: job.launchPlanSnapshot != nil,
-            // An earlier receipt closes from its own row's X.
-            dismiss: job.restoredFromJournal ? nil : { [job, model] in model.dismissJob(job) },
             eject: { [job, model] in
                 // Re-validate at CLICK time: a continuation may have started
                 // since this row rendered (Ox review, F1 — the notification
@@ -2068,6 +2301,52 @@ struct LaneTrack: View {
     }
 }
 
+/// The job header's progress bar, drawn here and not with ProgressView.
+/// AppKit takes the tint off a progress indicator whose window is not the
+/// key window, and in light mode the bar all but vanished. An offload runs
+/// for an hour behind other windows, which is exactly when the bar is read
+/// (2026-11-11). A nil `fraction` is the indeterminate sweep.
+struct PhaseBar: View {
+    let fraction: Double?
+    let tint: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var sweep = false
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary)
+                if let fraction {
+                    let clamped = min(1, max(0, fraction))
+                    Capsule()
+                        .fill(tint)
+                        .frame(width: clamped > 0 ? max(6, geo.size.width * clamped) : 0)
+                        .animation(.linear(duration: 0.4), value: clamped)
+                } else if reduceMotion {
+                    // No sweep: a steady half-strength bar still says "busy".
+                    Capsule().fill(tint.opacity(0.45))
+                } else {
+                    let segment = geo.size.width * 0.3
+                    Capsule()
+                        .fill(tint)
+                        .frame(width: segment)
+                        .offset(x: sweep ? geo.size.width : -segment)
+                        .onAppear {
+                            withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
+                                sweep = true
+                            }
+                        }
+                }
+            }
+            .clipShape(Capsule())
+        }
+        .frame(height: 6)
+        .accessibilityElement()
+        .accessibilityLabel("Progress")
+        .accessibilityValue(fraction.map { "\(Int(min(1, max(0, $0)) * 100)) percent" } ?? "In progress")
+    }
+}
+
 /// Global queue dispatch status and operator controls. Shows whether
 /// automatic dispatch of queued transfers is running or paused, and provides
 /// accessible pause/resume controls.
@@ -2131,7 +2410,6 @@ private struct ReceiptActionRow: View, Equatable {
     let ejectLabel: String?
     let reportPath: String?
     let canRetry: Bool
-    let dismiss: (() -> Void)?
     let eject: () -> Void
     let showEvidence: () -> Void
     let quickLook: (String) -> Void
@@ -2147,9 +2425,11 @@ private struct ReceiptActionRow: View, Equatable {
         // leaves ~384pt after card padding (codex + opus review of the
         // 2026-09-04 audit commit). Fall back to two rows rather than
         // overflow the card or truncate labels again.
+        // No Dismiss button here: the card's close button in the header
+        // does that, and the two said one thing twice, with Dismiss in the
+        // row's first seat ahead of Eject and the report (2026-11-11).
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
-                dismissButton
                 Spacer()
                 ejectSourceButton
                 evidenceButton
@@ -2163,26 +2443,11 @@ private struct ReceiptActionRow: View, Equatable {
                     evidenceButton
                 }
                 HStack(spacing: 8) {
-                    dismissButton
                     Spacer()
                     openReportMenu
                     stageRetryButton
                 }
             }
-        }
-    }
-
-    /// Takes this one card off the column. Left-aligned and away from the
-    /// evidence actions so it is never hit by mistake.
-    @ViewBuilder
-    private var dismissButton: some View {
-        if let dismiss {
-            Button(action: dismiss) {
-                Label("Dismiss", systemImage: "eye.slash")
-            }
-            .controlSize(.small)
-            .fixedSize()
-            .help("Hide this card. It stays in History.")
         }
     }
 

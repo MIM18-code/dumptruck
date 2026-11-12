@@ -2398,14 +2398,22 @@ final class AppModel: ObservableObject {
         if let reason = launchBlockedReason { return reason }
         if destinationPaths.isEmpty { return Self.noDestinationReason }
         let staging = batchStagingModel
-        if staging.cardsReadyToQueue { return nil }
-        if staging.hasRefusedCard {
-            return "A card in the batch can't start — Review Batch shows why"
+        // One Ready card is enough: Start copies the Ready cards and leaves
+        // the rest on the rail with their reasons (issue #25).
+        if staging.canStartReadyCards { return nil }
+        if !staging.isInspecting, staging.hasRefusedCard {
+            return staging.candidates.count == 1
+                ? "The card in the batch can't start — Review Batch shows why"
+                : "No card in the batch can start — Review Batch shows why"
         }
         let waiting = max(staging.notReadyCount, 1)
-        return waiting == 1 ? "Waiting on 1 card in the batch…"
-            : "Waiting on \(waiting) cards in the batch…"
+        return Self.batchWaitingPrefix + (waiting == 1 ? "1 card in the batch…"
+            : "\(waiting) cards in the batch…")
     }
+
+    /// How a "the batch is still being read" reason begins. The batch card
+    /// shows those quietly, like the other next steps.
+    static let batchWaitingPrefix = "Waiting on "
 
     var startBlockedReason: String? {
         if let reason = launchBlockedReason { return reason }
@@ -2847,9 +2855,9 @@ final class AppModel: ObservableObject {
         start()
     }
 
-    /// The batch window's Start, reached from the toolbar or ⌘R. A refusal
-    /// the operator has to look at (a refused card, a name that changed at
-    /// the queue edge) opens the batch window where the cards are listed.
+    /// The batch window's Start, reached from the toolbar or ⌘R. When no
+    /// card can start (every card refused, a name that changed at the queue
+    /// edge) the batch window opens, where the cards are listed.
     func startBatchOrExplain() {
         if let reason = batchStartBlockedReason {
             lastSetupError = reason
@@ -2859,8 +2867,11 @@ final class AppModel: ObservableObject {
         }
         switch batchStagingModel.queueBatch(appModel: self) {
         case .success:
-            lastSetupError = nil
-            startGateExplanation = nil
+            // Cards that could not start stay on the rail; say which and why
+            // without opening a window over the transfers that just began.
+            let held = batchStagingModel.heldBackLine
+            lastSetupError = held
+            startGateExplanation = held
         case .failure(let error):
             let reason = batchStagingModel.generalError ?? error.description
             lastSetupError = reason

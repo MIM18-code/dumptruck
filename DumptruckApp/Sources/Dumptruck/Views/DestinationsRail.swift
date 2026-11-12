@@ -170,7 +170,6 @@ struct DestinationsRail: View {
                   + "card folder is created inside it")
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(.bar)
     }
 
     private var presetMenu: some View {
@@ -231,7 +230,11 @@ struct DestinationsRail: View {
                   : "bookmark.slash")
                 .font(.caption)
         }
+        // The label's own .font does not reach a borderless menu's title;
+        // it drew at body size beside the caption-size button next to it.
         .menuStyle(.borderlessButton).hoverHighlight()
+        .font(.caption)
+        .controlSize(.small)
         .fixedSize()
         .help("Save, apply, delete, or restore destination presets")
         .accessibilityLabel("Destination presets")
