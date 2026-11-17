@@ -5,7 +5,7 @@ import SwiftUI
 enum Pref {
     static let verifyMode = "verifyMode"                 // "full" | "fast"
     static let queueMode = "queueMode"                   // "off" | "single"
-    static let sourceReread = "sourceReread"             // Bool, default true
+    static let sourceReread = "sourceReread"             // Bool, default false
     static let reverifyExisting = "reverifyExisting"     // Bool, default false
     static let extraHashes = "extraHashes"               // comma list: md5,sha1,sha256,c4
     static let makeReports = "makeReports"               // Bool, default true
@@ -191,9 +191,10 @@ enum VerificationLevel: String, CaseIterable {
         var extraHashes: String
     }
 
-    /// The working DIT bar: full byte verification + a second source read.
+    /// The working DIT bar: one card read, every destination byte read back
+    /// and compared. A second card read doubles card time on slow cards.
     static let standardValues = Values(
-        verifyMode: "full", sourceReread: true,
+        verifyMode: "full", sourceReread: false,
         reverifyExisting: false, extraHashes: "")
     /// Every check on: prior offloads re-read instead of trusted, and every
     /// extra checksum recorded alongside xxHash64.
@@ -220,7 +221,7 @@ enum VerificationLevel: String, CaseIterable {
 private struct TransferSettings: View {
     @AppStorage(Pref.verifyMode) private var verifyMode = "full"
     @AppStorage(Pref.queueMode) private var queueMode = "off"
-    @AppStorage(Pref.sourceReread) private var sourceReread = true
+    @AppStorage(Pref.sourceReread) private var sourceReread = false
     @AppStorage(Pref.reverifyExisting) private var reverifyExisting = false
     @AppStorage(Pref.extraHashes) private var extraHashes = ""
     @AppStorage(Pref.autoEjectWhenSafe) private var autoEjectWhenSafe = false
@@ -263,8 +264,8 @@ private struct TransferSettings: View {
             }
 
             Section {
-                settingRow(caption: "Needed before a card can be called safe to clear.") {
-                    Toggle("Re-read the source after copying (catches failing cards and readers)",
+                settingRow(caption: "Catches a failing card or reader. Doubles the card time on slow cards.") {
+                    Toggle("Read the card a second time",
                            isOn: $sourceReread)
                 }
                 settingRow(caption: "Slower on big continuation cards; use when a destination drive is suspect.") {
@@ -315,10 +316,11 @@ private struct TransferSettings: View {
     private var levelCaption: String {
         switch verificationLevel.wrappedValue {
         case .standard:
-            return "Every byte read back and compared, and the card read a "
-                + "second time. The right setting for nearly every offload."
+            return "The card read once and every copied byte read back and "
+                + "compared. The right setting for nearly every offload."
         case .maximum:
-            return "Also re-reads files offloaded earlier and adds MD5, SHA-1, "
+            return "Also reads the card a second time, re-reads files offloaded "
+                + "earlier and adds MD5, SHA-1, "
                 + "SHA-256 and C4 to the receipt. Lets a topped-up card be "
                 + "called safe to clear."
         case .custom:

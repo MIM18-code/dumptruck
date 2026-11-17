@@ -212,7 +212,7 @@ enum JobPhase: String {
     case queued = "Queued"
     case starting = "Starting"
     case copying = "Copying + verifying"
-    case sourceVerify = "Re-reading source"
+    case sourceVerify = "Confirming card read"
     case reports = "Sealing manifests + report"
     case done = "Done"
     case failed = "FAILED"
@@ -481,6 +481,9 @@ final class Job: ObservableObject, Identifiable {
     /// for files the engine saved beside a different file of the same name
     /// (file_done "saved_as"). Runtime evidence like the hashes above.
     var savedAsPaths: [String: [String: String]] = [:]
+    /// Card folder -> card path -> the stat identity the engine took right
+    /// after committing that verified copy (file_done "identity").
+    var verifiedFileIdentities: [String: [String: DestinationFileIdentity]] = [:]
 
     /// The verified hashes keyed by where each file sits under `root`. A
     /// file saved beside another is checked at the name it was saved as:
@@ -489,6 +492,14 @@ final class Job: ObservableObject, Identifiable {
         guard let renamed = savedAsPaths[root], !renamed.isEmpty else { return verifiedFileHashes }
         var out: [String: UInt64] = [:]
         for (path, hash) in verifiedFileHashes { out[renamed[path] ?? path] = hash }
+        return out
+    }
+    /// The engine-recorded identities keyed like `expectedHashes(forRoot:)`.
+    func expectedIdentities(forRoot root: String) -> [String: DestinationFileIdentity] {
+        guard let byPath = verifiedFileIdentities[root] else { return [:] }
+        let renamed = savedAsPaths[root] ?? [:]
+        var out: [String: DestinationFileIdentity] = [:]
+        for (path, identity) in byPath { out[renamed[path] ?? path] = identity }
         return out
     }
     @Published var destinationCheckPending = false

@@ -451,7 +451,7 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.register(defaults: [
             Pref.verifyMode: "full",
             Pref.queueMode: "off",
-            Pref.sourceReread: true,
+            Pref.sourceReread: false,
             Pref.reverifyExisting: false,
             Pref.makeReports: true,
             Pref.thumbnails: true,
@@ -1005,7 +1005,8 @@ final class AppModel: ObservableObject {
             guard let monitor = SourceMutationMonitor(
                 path: root, filter: .destinationJunk,
                 judge: DestinationChangeJudge(root: root,
-                                              expectedHashes: job.expectedHashes(forRoot: root)),
+                                              expectedHashes: job.expectedHashes(forRoot: root),
+                                              expectedIdentities: job.expectedIdentities(forRoot: root)),
                 settled: { [weak self] in
                     Task { @MainActor [weak self] in self?.destinationMonitoringSettled(jobID: jobID) }
                 },
@@ -1930,7 +1931,7 @@ final class AppModel: ObservableObject {
         guard let plan = stagedRetryPlan else { return "" }
         let d = UserDefaults.standard
         let fast = retryUsesCurrentSettings ? d.string(forKey: Pref.verifyMode) == "fast" : plan.args.contains("--fast")
-        let reread = retryUsesCurrentSettings ? d.object(forKey: Pref.sourceReread) == nil || d.bool(forKey: Pref.sourceReread) : !plan.args.contains("--no-source-verify")
+        let reread = retryUsesCurrentSettings ? d.bool(forKey: Pref.sourceReread) : !plan.args.contains("--no-source-verify")
         let existing = retryUsesCurrentSettings ? d.bool(forKey: Pref.reverifyExisting) : plan.args.contains("--reverify-existing")
         return "\(fast ? "Size check only" : "Full verification") · source reread \(reread ? "on" : "off") · existing copies \(existing ? "re-read" : "trusted")"
     }
@@ -3147,6 +3148,7 @@ final class AppModel: ObservableObject {
         armDestinationAuthority(for: job)
         job.verifiedFileHashes.removeAll()
         job.savedAsPaths.removeAll()
+        job.verifiedFileIdentities.removeAll()
         objectWillChange.send()  // re-gate the Start button + eject locks NOW
         playSound(for: job)
         switch job.verdict {
@@ -3540,7 +3542,7 @@ final class AppModel: ObservableObject {
         if LooseSourceStaging.isStagedSet(src) { args.append("--loose-files") }
         args += LooseSourceStaging.engineFlags(for: src)
         if fast || d.string(forKey: Pref.verifyMode) == "fast" { args.append("--fast") }
-        if d.object(forKey: Pref.sourceReread) != nil, !d.bool(forKey: Pref.sourceReread) {
+        if !d.bool(forKey: Pref.sourceReread) {
             args.append("--no-source-verify")
         }
         if d.bool(forKey: Pref.reverifyExisting) { args.append("--reverify-existing") }
@@ -4440,6 +4442,13 @@ final class AppModel: ObservableObject {
                 job.verifiedFileHashes[path] = hash
                 if let savedAs = obj["saved_as"] as? [String: String] {
                     for (root, rel) in savedAs { job.savedAsPaths[root, default: [:]][path] = rel }
+                }
+                if let identity = obj["identity"] as? [String: [String: Any]] {
+                    for (root, fields) in identity {
+                        if let id = DestinationFileIdentity(json: fields) {
+                            job.verifiedFileIdentities[root, default: [:]][path] = id
+                        }
+                    }
                 }
             }
             job.bytesFinished += (obj["bytes"] as? NSNumber)?.int64Value ?? 0

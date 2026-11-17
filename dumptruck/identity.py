@@ -85,6 +85,17 @@ def volume_uuid(path) -> str | None:
         return None
 
 
+# Files a recorder rewrites by itself while the card stays the same card.
+# As an anchor, one of these made a re-inserted card a stranger to its own
+# folder: a Sound Devices MixPre updates SOUNDDEV/SDINFO.TXT with every
+# recording, so the topped-up card was offloaded into MixPre_2 (2026-11-17).
+_VOLATILE_ANCHORS = {"sounddev/sdinfo.txt"}
+
+
+def _volatile(rel_path):
+    return rel_path.replace("\\", "/").lower() in _VOLATILE_ANCHORS
+
+
 def anchors(source_root, entries=None):
     """The up-to-16 OLDEST files as [rel_path, size, mtime_s] tuples.
 
@@ -96,7 +107,8 @@ def anchors(source_root, entries=None):
     """
     if entries is None:
         entries, _dirs, _warn = scan_source(source_root)
-    oldest = sorted(entries, key=lambda e: (e.mtime_ns, e.rel_path))[:16]
+    oldest = sorted((e for e in entries if not _volatile(e.rel_path)),
+                    key=lambda e: (e.mtime_ns, e.rel_path))[:16]
     return [[e.rel_path, e.size, e.mtime_ns // 1_000_000_000] for e in oldest]
 
 
@@ -120,7 +132,8 @@ def identify(source_root, entries=None):
     src_anchors = anchors(source_root, entries)
     matches = []
     for rec in _load()["datasets"]:
-        rec_anchors = rec.get("anchors") or []
+        # Records written before the volatile list still carry those files.
+        rec_anchors = [a for a in rec.get("anchors") or [] if not _volatile(a[0])]
         if not rec_anchors:
             continue
         if not all(index.get(rel) == (size, mtime_s) for rel, size, mtime_s in rec_anchors):

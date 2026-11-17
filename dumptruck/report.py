@@ -55,7 +55,7 @@ _HASH_ALGORITHMS = set(_HASH_LENGTHS) | {"c4"}
 _ATTESTATION_BOOL_FIELDS = {
     "destination_readback", "write_fd_nocache", "verify_fd_nocache",
     "full_flush_before_close", "source_grew_after_scan", "safe_to_wipe_source",
-    "camera_history_failed",
+    "camera_history_failed", "source_reread_requested",
 }
 _ATTESTATION_INT_FIELDS = {
     "source_read_count", "independently_verified_destinations",
@@ -435,7 +435,8 @@ def build_report(result, att, card_info, media_info, dataset=None):
 <tr><td>Verification mode</td><td>{'full destination readback' if result.verify_mode == 'full'
  else '<span class="warn">FAST — size check only, DESTINATION NOT VERIFIED</span>'}</td></tr>
 <tr><td>Source read passes</td><td>{att['source_read_count']}
- {'(re-read consistent)' if att['source_reread_consistent'] else ''}</td></tr>
+ {'(re-read consistent)' if att['source_reread_consistent'] else
+   ('(second card read off in Settings)' if att.get('source_reread_requested') is False else '')}</td></tr>
 <tr><td>Cache-bypass policy</td><td>{'F_NOCACHE succeeded on all destination writes and verify reads (data never entered the buffer cache)'
  if att['write_fd_nocache'] and att['verify_fd_nocache']
  else '<span class="warn">DEGRADED — F_NOCACHE failed on at least one descriptor; some verify reads may have been cache-served</span>'}</td></tr>

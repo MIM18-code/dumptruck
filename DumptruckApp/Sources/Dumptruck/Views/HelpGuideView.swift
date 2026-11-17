@@ -220,12 +220,13 @@ struct HelpGuideView: View {
 
                     section("Transfers", """
                     Verification level. Two curated bundles and a Custom \
-                    escape hatch. Standard is the working DIT bar: full byte \
-                    verification plus a second source read. That makes a \
-                    fresh card eligible for SAFE TO CLEAR; the verdict itself \
+                    escape hatch. Standard is the working DIT bar: the card is \
+                    read once and every destination byte is read back and \
+                    compared. That makes a fresh card eligible for SAFE TO \
+                    CLEAR; the verdict itself \
                     still requires two separate physical drives and every \
                     runtime check passing. Maximum turns everything on: \
-                    prior offloads are re-read instead of trusted, and MD5, \
+                    a second card read, prior offloads are re-read instead of trusted, and MD5, \
                     SHA-1, SHA-256 and C4 ride along with xxHash64, recorded \
                     in the receipt JSON as long as reports stay on. Maximum \
                     is required before a continuation card can earn SAFE TO \
@@ -246,13 +247,15 @@ struct HelpGuideView: View {
                     plain copy is possible. Fast exists for throwaway copies, \
                     not for anything you care about.
 
-                    Re-read the source after copying. A second pass over every \
+                    Read the card a second time. A second pass over every \
                     source file read this run, compared against the first \
                     read; with re-verify on, that covers the whole card. It \
                     is what catches \
                     a dying card or a flaky reader that returns different bytes \
-                    on different reads. Turning it off forfeits SAFE TO CLEAR \
-                    for the run.
+                    on different reads. It's off by default because it doubles \
+                    the card time whenever the card is slower than the drives; \
+                    a card can still earn SAFE TO CLEAR without it. A second \
+                    read that disagrees with the first always fails the job.
 
                     Re-verify previously offloaded files. On a top-up, re-read \
                     the old files at the destinations instead of trusting the \

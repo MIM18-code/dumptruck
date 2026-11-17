@@ -83,6 +83,10 @@ class FileResult:
     # card_root -> path below it, only where the file was saved beside an
     # existing different file of the same name (see _reader_loop).
     dest_names: dict = field(default_factory=dict)
+    # card_root -> stat identity of the committed, verified copy, taken right
+    # after the commit. The app checks its post-verdict watch baseline against
+    # this instead of reading every copied byte a third time.
+    dest_identity: dict = field(default_factory=dict)
 
     def dest_rel(self, card_root) -> str:
         """Where this file is under card_root: its own path, unless that name
@@ -175,6 +179,10 @@ class OffloadResult:
     verify_mode: str = "full"
     verify_schedule: str = "overlap"
     source_reread_ok: bool | None = None
+    # False when the operator turned the second card read off. Wipe
+    # authorization then rests on the copy-time source hash plus 2+ verified
+    # drives, like OffShoot's Transfer mode plus full destination hashing.
+    source_reread_requested: bool = True
     errors: list = field(default_factory=list)
     warnings: list = field(default_factory=list)
     trusted_prior_files: int = 0
@@ -295,13 +303,17 @@ class OffloadResult:
         flush_ok = self.io_flush_all or (
             bool(self.flush_failures)
             and set(self.flush_failures) <= excused_shares)
-        # Wipe authorization demands MAXIMUM evidence (coverage-audit gaps):
-        # a consistent SECOND source read, honest cache/flush syscalls, a
-        # source tree that did not grow after scanning, and 2+ real devices.
+        # Wipe authorization demands: a consistent SECOND source read unless
+        # the operator turned it off (a failed one always blocks), honest
+        # cache/flush syscalls, a source tree that did not grow after
+        # scanning, and 2+ real devices.
+        reread_ok = (self.source_reread_ok is True
+                     or (self.source_reread_ok is None
+                         and not self.source_reread_requested))
         safe = (
             self.fully_verified
             and len(devices) >= 2
-            and self.source_reread_ok is True
+            and reread_ok
             and self.io_nocache_all
             and flush_ok
             and self.io_verify_nocache_all
@@ -347,7 +359,7 @@ class OffloadResult:
             else:
                 blockers.append(
                     f"copies span only {len(devices)} known physical device(s); 2+ required")
-        if self.source_reread_ok is not True:
+        if not reread_ok:
             blockers.append("no consistent second source read this run")
         if not self.io_nocache_all:
             blockers.append("cache bypass failed on at least one destination write")
@@ -389,6 +401,7 @@ class OffloadResult:
             "verify_fd_nocache": self.io_verify_nocache_all,
             "full_flush_before_close": self.io_flush_all,
             "source_reread_consistent": self.source_reread_ok,
+            "source_reread_requested": self.source_reread_requested,
             "source_grew_after_scan": self.source_grew_after_scan,
             "uncopied_source_objects": self.uncopied_source_objects,
             "codec_validation": "not performed",
@@ -1403,6 +1416,7 @@ def offload(
         destinations=[os.path.abspath(d) for d in dest_roots],
         started_at=time.time(),
         verify_mode=verify_mode,
+        source_reread_requested=bool(source_reread),
         loose_files=bool(loose_files),
     )
     card_roots = [os.path.join(d, label) for d in result.destinations]
@@ -1661,6 +1675,101 @@ def _device_is_solid_state(device_or_mount):
         return None
 
 
+class _RereadAborted(Exception):
+    pass
+
+
+class _SourceRereadWorker(threading.Thread):
+    """Second source read, overlapped with the copy: each file is read from
+    the card again as soon as the copy pass has hashed it, using the time the
+    card would otherwise sit idle behind slower destinations. Results are
+    only evidence; the end-of-job pass adjudicates them and re-reads anything
+    this worker did not reach."""
+
+    def __init__(self, source_fd, result):
+        super().__init__(daemon=True)
+        self.source_fd = source_fd
+        self.result = result
+        self.q = queue.Queue()
+        self.hashes = {}  # id(FileResult) -> hex digest or OSError
+        self._abort = threading.Event()
+        self.submitted_bytes = 0
+        self.done_bytes = 0
+
+    def submit(self, fr):
+        self.submitted_bytes += fr.size
+        self.q.put(fr)
+
+    def finish(self):
+        self.q.put(None)
+
+    def abort(self):
+        self._abort.set()
+        self.q.put(None)
+
+    @property
+    def aborted(self):
+        return self._abort.is_set()
+
+    def _check(self, n):
+        if self._abort.is_set():
+            raise _RereadAborted()
+        self.done_bytes += n
+
+    def drain(self, ev):
+        """Wait for the remaining re-reads. When the card is slower than the
+        destinations this can take minutes after the last verify, so report it
+        as the re-read phase with live progress; a silent wait reads as a
+        stalled drive in the app."""
+        self.join(timeout=0.5)
+        if not self.is_alive():
+            return
+        base = self.done_bytes
+        total = max(self.submitted_bytes - base, 0)
+        try:
+            ev({"event": "source_reread_started", "total": total})
+        except Exception:  # noqa: BLE001 — progress is advisory
+            pass
+        while self.is_alive():
+            self.join(timeout=1.0)
+            try:
+                ev({"event": "source_reread_progress",
+                    "done": min(self.done_bytes - base, total), "total": total})
+            except Exception:  # noqa: BLE001
+                pass
+
+    def run(self):
+        while True:
+            fr = self.q.get()
+            if fr is None or self._abort.is_set():
+                return
+            try:
+                leaf = _secure_leaf_fd(self.source_fd, os.path.dirname(fr.rel_path))
+                try:
+                    got = _cold_hash(os.path.basename(fr.rel_path), self.result,
+                                     progress=self._check, dir_fd=leaf)
+                finally:
+                    os.close(leaf)
+            except _RereadAborted:
+                return
+            except OSError as e:
+                got = e
+            self.hashes[id(fr)] = got
+
+
+def _overlap_source_reread(source_root):
+    """Overlap the second source read with the copy unless the source is a
+    spinning disk, where two concurrent streams would seek against each
+    other. Cards and SSDs (or media diskutil cannot classify) overlap."""
+    override = os.environ.get("DUMPTRUCK_OVERLAP_REREAD")
+    if override in ("0", "1"):
+        return override == "1"
+    stores = macio.physical_stores(source_root)
+    if stores == macio.UNKNOWN_DEVICE:
+        return True
+    return not any(_device_is_solid_state(s) is False for s in stores)
+
+
 def _verify_schedule(card_roots, physical_stores_by_root):
     """Choose once from the pinned topology. Unknown media retain overlap."""
     override = os.environ.get("DUMPTRUCK_VERIFY_PER_FILE")
@@ -1853,6 +1962,9 @@ class _VerifyCommitWorker(threading.Thread):
         flush the directory. Returns None on success, the error otherwise."""
         try:
             _commit_noreplace(task["leaf_fd"], task["tmp"], task["final"])
+            # Before the flush: a change during it must move the ctime past
+            # this record, never into it.
+            task["committed_identity"] = _stat_identity(task["final"], task["leaf_fd"])
             flush_err, fsync_err = macio.flush_to_media(task["leaf_fd"])
             if flush_err is not None:
                 # The rename itself is not durably on media: a power cut can
@@ -1897,6 +2009,10 @@ class _VerifyCommitWorker(threading.Thread):
                 except Exception:  # noqa: BLE001
                     pass
 
+            # The rename moves ctime, so continuity from this readback to the
+            # committed file rests on inode, size and mtime: any ordinary
+            # write after this stat moves the mtime and drops the identity.
+            pre_read = _stat_identity(tmp, task["leaf_fd"])
             try:
                 with self.admission.verify(cr):
                     ok = _cold_hash(tmp, self.result, progress=_verify_progress,
@@ -1914,8 +2030,14 @@ class _VerifyCommitWorker(threading.Thread):
             if ok:
                 commit_error = self._commit(task)
                 if commit_error is None:
+                    identity = task.get("committed_identity")
+                    if pre_read is None or identity is None or any(
+                            pre_read[k] != identity[k] for k in ("dev", "ino", "size", "mtime_ns")):
+                        identity = None  # continuity unproven: the app hashes it
                     with self.lock:
                         fr.dest_status[cr] = "verified"
+                        if identity is not None:
+                            fr.dest_identity[cr] = identity
                     task["committed"] = True
                 else:
                     with self.lock:
@@ -2041,6 +2163,21 @@ def _place_beside(root_fd, rel_path, size, want_hash, result, reserved):
         os.close(leaf)
 
 
+def _stat_identity(name, leaf_fd):
+    """Stat identity of a destination file, or None. Taken right after the
+    commit of a verified copy, any later write or replacement changes the
+    inode, size, mtime or ctime, so a match lets the app trust this run's
+    readback instead of hashing again. A miss only costs the app a re-hash."""
+    try:
+        st = os.stat(name, dir_fd=leaf_fd, follow_symlinks=False)
+    except OSError:
+        return None
+    if not stat_mod.S_ISREG(st.st_mode):
+        return None
+    return {"dev": st.st_dev & 0xFFFFFFFF, "ino": st.st_ino, "size": st.st_size,
+            "mtime_ns": st.st_mtime_ns, "ctime_ns": st.st_ctime_ns}
+
+
 def _file_done_event(fr, entry):
     """A file's closing event. "saved_as" is present only when the file sits
     under another name at some destination (card folder -> path there): the
@@ -2051,6 +2188,9 @@ def _file_done_event(fr, entry):
              "status": fr.dest_status}
     if fr.dest_names:
         event["saved_as"] = dict(fr.dest_names)
+    if fr.dest_identity:
+        event["identity"] = {cr: dict(i) for cr, i in fr.dest_identity.items()
+                             if fr.dest_status.get(cr) == "verified"}
     return event
 
 
@@ -2085,7 +2225,8 @@ def _space_needed(card_root, entry, reserved=frozenset()):
 
 def _reader_loop(source_root, result, card_roots, entries, hash_formats,
                  verify_mode, reverify_existing, history, verify_workers,
-                 iolock, ev, root_fds, source_fd, verify_admission):
+                 iolock, ev, root_fds, source_fd, verify_admission,
+                 on_source_hashed=None):
     """The card-reader producer: one sequential pass over the source, staging
     writes and handing verify/commit to the per-destination pipeline workers.
     All destination I/O flows through the pinned root descriptors in root_fds."""
@@ -2205,6 +2346,8 @@ def _reader_loop(source_root, result, card_roots, entries, hash_formats,
                     "outcome": "failed", "xxh64": None, "status": fr.dest_status})
                 continue
             fr.hashes = fr_hashes
+            if on_source_hashed is not None:
+                on_source_hashed(fr)
 
             # Trusted/conflict adjudication FIRST (workers must see final statuses
             # for every non-write destination before they compute the outcome).
@@ -2536,24 +2679,58 @@ def _offload_locked(source_root, result, card_roots, entries, hash_formats,
     verify_workers = {cr: _VerifyCommitWorker(result, iolock, ev, cr, root_pins[cr],
                                                verify_admission)
                       for cr in card_roots}
+    reread_worker = (_SourceRereadWorker(source_fd, result)
+                     if source_reread and verify_mode == "full" and source_fd is not None
+                     and _overlap_source_reread(source_root) else None)
     try:
         with _defer_sigint():
             for _w in verify_workers.values():
                 _w.start()
+            if reread_worker is not None:
+                reread_worker.start()
         _reader_loop(source_root, result, card_roots, entries, hash_formats,
                      verify_mode, reverify_existing, history, verify_workers,
-                     iolock, ev, root_fds, source_fd, verify_admission)
+                     iolock, ev, root_fds, source_fd, verify_admission,
+                     on_source_hashed=reread_worker.submit if reread_worker else None)
+    except BaseException:
+        if reread_worker is not None:
+            reread_worker.abort()
+        raise
     finally:
-        with _defer_sigint():
-            for w in verify_workers.values():
-                if w.ident is not None:
-                    w.finish()
-            for w in verify_workers.values():
-                if w.ident is not None:
-                    w.join()
-                w.discard_queued()
-                if not w.normal_exit:
-                    result.errors.append(f"verify worker stopped: {w.card_root}")
+        try:
+            with _defer_sigint():
+                if reread_worker is not None and reread_worker.ident is not None:
+                    reread_worker.finish()
+                for w in verify_workers.values():
+                    if w.ident is not None:
+                        w.finish()
+                for w in verify_workers.values():
+                    if w.ident is not None:
+                        w.join()
+                    w.discard_queued()
+                    if not w.normal_exit:
+                        result.errors.append(f"verify worker stopped: {w.card_root}")
+        except BaseException:
+            # A Ctrl-C deferred through the verify drain lands here.
+            if reread_worker is not None:
+                reread_worker.abort()
+            raise
+        finally:
+            # The worker reads through source_fd: it must be done before the
+            # caller closes that descriptor, on every exit path. Its drain may
+            # take minutes on a slow card, so it stays interruptible: Ctrl-C
+            # there cancels the remaining reads; only the join is deferred.
+            if reread_worker is not None and reread_worker.ident is not None:
+                try:
+                    if not reread_worker.aborted:
+                        reread_worker.drain(ev)
+                except BaseException:
+                    reread_worker.abort()
+                    raise
+                finally:
+                    with _defer_sigint():
+                        reread_worker.join()
+    early_rereads = reread_worker.hashes if reread_worker is not None else {}
 
     # Post-drain audits + camera history can take minutes on a large
     # accumulated card folder — tell the GUI a phase is running (round-9
@@ -2662,9 +2839,12 @@ def _offload_locked(source_root, result, card_roots, entries, hash_formats,
         # The re-read pass covers every byte hashed this run — feed the GUI a
         # determinate progress stream (a minutes-long silent phase reads as a
         # hang to the operator).
+        # Files the overlapped worker already re-read need no second pass.
         reread_total = sum(fr.size for fr in result.files
-                           if not fr.skipped and fr.hashes)
-        ev({"event": "source_reread_started", "total": reread_total})
+                           if not fr.skipped and fr.hashes
+                           and id(fr) not in early_rereads)
+        if reread_total:
+            ev({"event": "source_reread_started", "total": reread_total})
         _rr = {"done": 0, "last_emit_time": time.monotonic()}
 
         def _reread_progress(n):
@@ -2683,12 +2863,16 @@ def _offload_locked(source_root, result, card_roots, entries, hash_formats,
             if result.source_reread_ok is None:
                 result.source_reread_ok = True
             try:
-                _rleaf = _secure_leaf_fd(source_fd, os.path.dirname(fr.rel_path))
-                try:
-                    again = _cold_hash(os.path.basename(fr.rel_path), result,
-                                       progress=_reread_progress, dir_fd=_rleaf)
-                finally:
-                    os.close(_rleaf)
+                again = early_rereads.get(id(fr))
+                if isinstance(again, OSError):
+                    raise again
+                if again is None:
+                    _rleaf = _secure_leaf_fd(source_fd, os.path.dirname(fr.rel_path))
+                    try:
+                        again = _cold_hash(os.path.basename(fr.rel_path), result,
+                                           progress=_reread_progress, dir_fd=_rleaf)
+                    finally:
+                        os.close(_rleaf)
             except OSError as e:
                 result.source_reread_ok = False
                 result.errors.append(f"{fr.rel_path}: source re-read failed: {e}")

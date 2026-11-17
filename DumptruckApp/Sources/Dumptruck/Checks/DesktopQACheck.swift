@@ -179,6 +179,56 @@ enum DesktopQACheck {
         let cardPathJudge = DestinationChangeJudge(root: besideRoot, expectedHashes: besideJob.verifiedFileHashes)
         cardPathJudge.capture()
         require(!cardPathJudge.isReady, "checked at the card path the same folder fails, which was the bug")
+        // The engine's post-commit identity replaces the third full read of
+        // every copy (Joshua, 2026-11-17). An unreadable file proves the
+        // fast path never opens it; a timestamp-restored rewrite still moves
+        // ctime and falls back to hashing, which catches it.
+        let newerPath = besideRoot + "/clip_2.mov"
+        require(chmod(newerPath, 0) == 0, "fixture chmod")
+        guard let recorded = DestinationFileIdentity.current(at: newerPath) else {
+            require(false, "identity of a regular file"); return
+        }
+        let identityJob = Job(label: "CARD", sourcePath: r3Root + "/BESIDE/SRC", destinations: [r3Root + "/BESIDE"])
+        let identityFields: [String: Any] = [
+            "dev": NSNumber(value: recorded.dev), "ino": NSNumber(value: recorded.ino),
+            "size": NSNumber(value: recorded.size), "mtime_ns": NSNumber(value: recorded.mtimeNs),
+            "ctime_ns": NSNumber(value: recorded.ctimeNs)]
+        require(AppModel.apply(event: [
+            "event": "file_done", "path": "clip.mov", "bytes": 1048613, "outcome": "verified",
+            "xxh64": "4ceb0aec2321345e", "status": [besideRoot: "verified"],
+            "saved_as": [besideRoot: "clip_2.mov"], "identity": [besideRoot: identityFields],
+        ], to: identityJob), "a file_done with identity is a valid event")
+        require(identityJob.expectedIdentities(forRoot: besideRoot) == ["clip_2.mov": recorded],
+                "the identity is expected at the saved-as name")
+        let identityJudge = DestinationChangeJudge(
+            root: besideRoot, expectedHashes: identityJob.expectedHashes(forRoot: besideRoot),
+            expectedIdentities: identityJob.expectedIdentities(forRoot: besideRoot))
+        identityJudge.capture()
+        require(identityJudge.isReady, "a matching engine identity must stand in for re-reading the copy")
+        if getuid() != 0 {
+            let noIdentityJudge = DestinationChangeJudge(
+                root: besideRoot, expectedHashes: identityJob.expectedHashes(forRoot: besideRoot))
+            noIdentityJudge.capture()
+            require(!noIdentityJudge.isReady, "without an identity the unreadable copy is read and fails closed")
+        }
+        require(chmod(newerPath, 0o644) == 0, "fixture chmod restore")
+        guard let beforeTamper = DestinationFileIdentity.current(at: newerPath) else {
+            require(false, "identity before tamper"); return
+        }
+        var tampered = newerBytes
+        tampered[0] ^= 0xFF
+        try Data(tampered).write(to: URL(fileURLWithPath: newerPath))
+        var times = [timespec(tv_sec: Int(beforeTamper.mtimeNs / 1_000_000_000),
+                              tv_nsec: Int(beforeTamper.mtimeNs % 1_000_000_000)),
+                     timespec(tv_sec: Int(beforeTamper.mtimeNs / 1_000_000_000),
+                              tv_nsec: Int(beforeTamper.mtimeNs % 1_000_000_000))]
+        require(utimensat(AT_FDCWD, newerPath, &times, 0) == 0, "fixture utimensat")
+        let tamperJudge = DestinationChangeJudge(
+            root: besideRoot, expectedHashes: identityJob.expectedHashes(forRoot: besideRoot),
+            expectedIdentities: ["clip_2.mov": beforeTamper])
+        tamperJudge.capture()
+        require(!tamperJudge.isReady, "a rewrite with its mtime put back must not pass on identity")
+        try Data(newerBytes).write(to: URL(fileURLWithPath: newerPath))
         let missingJudge = DestinationChangeJudge(root: r3Root + "/missing", expectedHashes: ["x": 1])
         missingJudge.capture()
         require(!missingJudge.isReady && missingJudge.provesChange(r3Root + "/missing"),

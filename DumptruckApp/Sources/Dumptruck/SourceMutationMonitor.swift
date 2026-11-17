@@ -215,9 +215,50 @@ final class SourceMutationMonitor: @unchecked Sendable {
     }
 }
 
+/// The stat identity the engine recorded for a verified copy right after
+/// committing it (file_done "identity"). Any write since then moves the
+/// ctime, and a replacement moves the inode, so a match at capture means the
+/// file is still the bytes the engine just read back.
+struct DestinationFileIdentity: Equatable, Sendable {
+    let dev: UInt32
+    let ino: UInt64
+    let size: Int64
+    let mtimeNs: Int64
+    let ctimeNs: Int64
+
+    init(dev: UInt32, ino: UInt64, size: Int64, mtimeNs: Int64, ctimeNs: Int64) {
+        self.dev = dev; self.ino = ino; self.size = size
+        self.mtimeNs = mtimeNs; self.ctimeNs = ctimeNs
+    }
+
+    /// Parses one engine identity object; nil when any field is missing.
+    init?(json: [String: Any]) {
+        guard let dev = (json["dev"] as? NSNumber)?.uint32Value,
+              let ino = (json["ino"] as? NSNumber)?.uint64Value,
+              let size = (json["size"] as? NSNumber)?.int64Value,
+              let mtime = (json["mtime_ns"] as? NSNumber)?.int64Value,
+              let ctime = (json["ctime_ns"] as? NSNumber)?.int64Value else { return nil }
+        self.init(dev: dev, ino: ino, size: size, mtimeNs: mtime, ctimeNs: ctime)
+    }
+
+    /// The identity of whatever is at `path` now (lstat), or nil.
+    static func current(at path: String) -> DestinationFileIdentity? {
+        var st = stat()
+        guard lstat(path, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return nil }
+        return DestinationFileIdentity(
+            dev: UInt32(bitPattern: st.st_dev), ino: UInt64(st.st_ino),
+            size: Int64(st.st_size),
+            mtimeNs: Int64(st.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(st.st_mtimespec.tv_nsec),
+            ctimeNs: Int64(st.st_ctimespec.tv_sec) * 1_000_000_000 + Int64(st.st_ctimespec.tv_nsec))
+    }
+}
+
 /// A destination baseline is checked against the hashes carried by file_done.
-/// Metadata alone cannot prove unchanged content. Capture and event checks run
-/// on the stream queue, with current wipe authority suspended until they finish.
+/// Metadata alone cannot prove unchanged content, except against the stat
+/// identity the engine took right after its own readback: a file whose
+/// identity still matches is not read again. Every other file is hashed.
+/// Capture and event checks run on the stream queue, with current wipe
+/// authority suspended until they finish.
 final class DestinationChangeJudge: @unchecked Sendable {
     struct Entry: Equatable {
         let size: Int64
@@ -231,6 +272,7 @@ final class DestinationChangeJudge: @unchecked Sendable {
 
     let root: String
     private let expected: [String: UInt64]
+    private let identities: [String: DestinationFileIdentity]
     private let resolvedRoot: String
     private let rootIdentity: Entry?
     private let lock = NSLock()
@@ -240,9 +282,11 @@ final class DestinationChangeJudge: @unchecked Sendable {
     private var cancelled = false
     var onCaptureFailed: (@Sendable () -> Void)?
 
-    init(root: String, expectedHashes: [String: UInt64]) {
+    init(root: String, expectedHashes: [String: UInt64],
+         expectedIdentities: [String: DestinationFileIdentity] = [:]) {
         self.root = root
         expected = expectedHashes
+        identities = expectedIdentities
         if let real = realpath(root, nil) {
             resolvedRoot = String(cString: real)
             free(real)
@@ -320,6 +364,17 @@ final class DestinationChangeJudge: @unchecked Sendable {
                 }
                 guard var e = Self.entry(at: url.path) else { failed = true; break }
                 if !e.isDir {
+                    // The engine's readback still stands for a file whose
+                    // identity has not moved since its commit: no third read.
+                    if let proof = expected[rel], let recorded = identities[rel],
+                       let now = DestinationFileIdentity.current(at: url.path),
+                       now == recorded, now.dev == UInt32(truncatingIfNeeded: e.dev),
+                       now.ino == e.ino, now.size == e.size, now.mtimeNs == e.mtimeNs {
+                        e.digest = proof
+                        found.insert(rel)
+                        entries[rel] = e
+                        continue
+                    }
                     guard let hash = digest(url.path, matching: e) else { failed = true; break }
                     e.digest = hash
                     if let proof = expected[rel] {

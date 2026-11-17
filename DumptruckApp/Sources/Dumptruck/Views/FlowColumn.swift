@@ -1470,7 +1470,7 @@ struct JobHeaderBand: View {
                 }
                 .opacity(job.isPaused ? 0.45 : 1)
             HStack(spacing: 10) {
-                Text("checking the card a second time")
+                Text("confirming the card read cleanly")
                 Text("·")
                 Text("\(bytesString(job.rereadDone)) of \(bytesString(job.rereadTotal))")
                     .contentTransition(.numericText())
@@ -2273,7 +2273,9 @@ struct DestinationLane: View {
         case .failed: return Semantics.dangerText
         case .complete: return Semantics.successText
         case .unverified, .stopped: return .secondary
-        case .sealing, .detached: return Semantics.warningText
+        // Sealing is routine work, not a warning (Joshua, 2026-11-17).
+        case .sealing: return Semantics.runningText
+        case .detached: return Semantics.warningText
         default: return Semantics.destinationText
         }
     }
@@ -2324,7 +2326,10 @@ struct LaneTrack: View {
         // once; the bars stay quiet (the red-orange read as an alarm,
         // Joshua, 2026-11-03).
         case .unverified, .stopped: return Color.secondary.opacity(0.55)
-        case .sealing, .detached: return Semantics.warning
+        // Sealing manifests is routine finishing work; red-orange read as
+        // an alarm (Joshua, 2026-11-17).
+        case .sealing: return Semantics.running
+        case .detached: return Semantics.warning
         case .complete: return Semantics.success
         case .failed: return Semantics.danger
         }

@@ -254,6 +254,22 @@ def scenario_mixed_trust_blocks_wipe(base):
         att85 = res85.attestation()
         check("baseline two-device offload is SAFE", att85["safe_to_wipe_source"], str(att85))
 
+        # Second card read off (the app default): one read plus two fully
+        # verified drives still earns SAFE; a failed or missing requested
+        # second read still blocks.
+        res85one = engine.offload(src85, [d85a, d85b], label="ONE_READ", source_reread=False)
+        att85one = res85one.attestation()
+        check("second read off still earns SAFE on two verified drives",
+              att85one["safe_to_wipe_source"] and att85one["source_read_count"] == 1
+              and att85one["source_reread_requested"] is False, str(att85one))
+        res85one.source_reread_ok = False
+        check("a second read that disagreed always blocks SAFE",
+              not res85one.attestation()["safe_to_wipe_source"])
+        res85one.source_reread_ok = None
+        res85one.source_reread_requested = True
+        check("a requested second read that never ran blocks SAFE",
+              not res85one.attestation()["safe_to_wipe_source"])
+
         # Step 2: one byte flips on A, size and mtime intact; B's copy goes.
         st_a = os.stat(copy_a)
         with open(copy_a, "r+b") as f:
@@ -640,7 +656,11 @@ def scenario_arri_sdk_helper_preferred(base):
 
 def scenario_source_reread_after_drain(base):
     """[85b] A source change after copy and destination verify must fail the
-    final source read, even when size and mtime are unchanged."""
+    final source read, even when size and mtime are unchanged, when that read
+    runs at the end of the job. With the read overlapped onto the copy
+    (Joshua, 2026-11-17, matching OffShoot's Source mode) a rewrite after a
+    file's second read that restores its size and mtime is an accepted gap;
+    this check pins the end-of-job pass that still runs on spinning sources."""
     from dumptruck import engine
     print("[85b] late source change remains visible to the final re-read")
     src = os.path.join(base, "CARD85B")
@@ -668,13 +688,16 @@ def scenario_source_reread_after_drain(base):
     try:
         engine.macio.physical_stores = lambda p: frozenset({"disk85b"})
         engine._cold_hash = observed_cold
+        os.environ["DUMPTRUCK_OVERLAP_REREAD"] = "0"
         d = os.path.join(base, "D85B_LATE"); os.makedirs(d)
         res = engine.offload(src, [d], label="CARD85B", event=change_after_drain)
+        os.environ.pop("DUMPTRUCK_OVERLAP_REREAD", None)
         check("late same-size source change fails the second read",
               res.source_reread_ok is False and not res.fully_verified
               and any("A.braw: SOURCE INCONSISTENT" in e for e in res.errors),
               f"worker_read={worker_read.is_set()} errors={res.errors[:3]}")
     finally:
+        os.environ.pop("DUMPTRUCK_OVERLAP_REREAD", None)
         engine._cold_hash, engine.macio.physical_stores = real_cold, real_stores
 
     # A failing event sink after the verify drain must not return while the
@@ -761,6 +784,276 @@ def scenario_verify_heartbeat(base):
         engine._cold_hash = real_cold
     check("a failing heartbeat sink never fails the verify",
           res2.fully_verified and not res2.errors, f"errors={res2.errors[:2]}")
+
+
+def scenario_file_done_identity(base):
+    """[85e] file_done carries each verified copy's post-commit stat
+    identity, so the app can arm its watcher without a third full read. It
+    must describe the committed file exactly, and only verified copies."""
+    from dumptruck import engine
+    print("[85e] file_done carries the committed copy's identity")
+    src = os.path.join(base, "CARD_ID1")
+    make_card(src, {"A.braw": 8192, "SUB/B.braw": 4096})
+    d1 = os.path.join(base, "D_ID1A"); os.makedirs(d1)
+    d2 = os.path.join(base, "D_ID1B"); os.makedirs(d2)
+    events = []
+    res = engine.offload(src, [d1, d2], label="CARD_ID1", event=events.append)
+    done = [e for e in events if e.get("event") == "file_done"]
+    ok = res.fully_verified and len(done) == 2
+    detail = f"fully_verified={res.fully_verified} done={len(done)} errors={res.errors[:2]}"
+    for e in done:
+        ident = e.get("identity") or {}
+        if set(ident) != {cr for cr, s in e["status"].items() if s == "verified"} or len(ident) != 2:
+            ok = False; detail = f"roots {sorted(ident)} vs {e['status']}"
+        for cr, i in ident.items():
+            st = os.stat(os.path.join(cr, e["path"]), follow_symlinks=False)
+            want = {"dev": st.st_dev & 0xFFFFFFFF, "ino": st.st_ino, "size": st.st_size,
+                    "mtime_ns": st.st_mtime_ns, "ctime_ns": st.st_ctime_ns}
+            if i != want:
+                ok = False; detail = f"{e['path']} at {cr}: {i} != {want}"
+    check("file_done identity matches each committed verified copy", ok, detail)
+
+    # A same-size rewrite after the readback must never earn an identity the
+    # app would accept without hashing (Sol review, 2026-11-17).
+    from dumptruck import macio
+
+    def _rewrite(name, dir_fd):
+        fd = os.open(name, os.O_WRONLY, dir_fd=dir_fd)
+        try:
+            os.pwrite(fd, b"\xff", 0)
+        finally:
+            os.close(fd)
+
+    real_commit = engine._commit_noreplace
+    real_flush = macio.flush_to_media
+
+    def commit_after_rewrite(dir_fd, tmp_name, final_name):
+        _rewrite(tmp_name, dir_fd)
+        return real_commit(dir_fd, tmp_name, final_name)
+
+    flushed = {}
+
+    def flush_after_rewrite(fd, *a, **k):
+        import stat as _st
+        if not _st.S_ISDIR(os.fstat(fd).st_mode):
+            return real_flush(fd, *a, **k)
+        for name in os.listdir(fd):
+            if name.endswith(".braw") and name not in flushed:
+                flushed[name] = True
+                _rewrite(name, fd)
+        return real_flush(fd, *a, **k)
+
+    for label, patch in (("before the commit", ("commit", commit_after_rewrite)),
+                         ("during the flush", ("flush", flush_after_rewrite))):
+        tag = "CARD_ID3" if patch[0] == "commit" else "CARD_ID4"
+        src3 = os.path.join(base, tag)
+        make_card(src3, {"D.braw": 4096})
+        d4 = os.path.join(base, "D_" + tag); os.makedirs(d4)
+        events3 = []
+        try:
+            if patch[0] == "commit":
+                engine._commit_noreplace = patch[1]
+            else:
+                macio.flush_to_media = patch[1]
+            engine.offload(src3, [d4], label=tag, event=events3.append)
+        finally:
+            engine._commit_noreplace = real_commit
+            macio.flush_to_media = real_flush
+        stale = []
+        done3 = [e for e in events3 if e.get("event") == "file_done"]
+        check(f"the copy still verifies with a rewrite {label}",
+              len(done3) == 1 and done3[0]["status"] and
+              all(v == "verified" for v in done3[0]["status"].values()), str(done3))
+        for e in events3:
+            if e.get("event") != "file_done":
+                continue
+            for cr, i in (e.get("identity") or {}).items():
+                st = os.stat(os.path.join(cr, e["path"]), follow_symlinks=False)
+                now = {"dev": st.st_dev & 0xFFFFFFFF, "ino": st.st_ino, "size": st.st_size,
+                       "mtime_ns": st.st_mtime_ns, "ctime_ns": st.st_ctime_ns}
+                if i == now:
+                    stale.append((e["path"], cr))
+        check(f"a rewrite {label} leaves no identity matching the changed copy",
+              not stale, str(stale))
+
+    src2 = os.path.join(base, "CARD_ID2")
+    make_card(src2, {"C.braw": 4096})
+    d3 = os.path.join(base, "D_ID2"); os.makedirs(d3)
+    events2 = []
+    engine.offload(src2, [d3], label="CARD_ID2", verify_mode="fast", event=events2.append)
+    done2 = [e for e in events2 if e.get("event") == "file_done"]
+    check("a size-only copy carries no identity",
+          done2 and all("identity" not in e for e in done2), str(done2[:1]))
+
+
+def scenario_overlapped_source_reread(base):
+    """[85g] The second source read overlaps the copy: every hashed file is
+    re-read from the card by the background worker, the end-of-job pass has
+    nothing left (no source_reread_started), and a bad second read is still
+    caught as SOURCE INCONSISTENT. With overlap off the old end pass runs."""
+    from dumptruck import engine
+    print("[85g] the second source read overlaps the copy")
+    real_cold = engine._cold_hash
+    saved = os.environ.get("DUMPTRUCK_OVERLAP_REREAD")
+    worker_reads = []
+
+    def counting_cold(*a, **k):
+        if type(threading.current_thread()).__name__ == "_SourceRereadWorker":
+            worker_reads.append(a[0])
+        return real_cold(*a, **k)
+
+    try:
+        os.environ["DUMPTRUCK_OVERLAP_REREAD"] = "1"
+        engine._cold_hash = counting_cold
+        src = os.path.join(base, "CARD_OV1")
+        make_card(src, {"A.braw": 8192, "B.braw": 4096, "SUB/C.braw": 2048})
+        d1 = os.path.join(base, "D_OV1A"); os.makedirs(d1)
+        ev1 = []
+        res = engine.offload(src, [d1], label="CARD_OV1", event=ev1.append)
+        started = [e for e in ev1 if e.get("event") == "source_reread_started"]
+        check("overlapped: every hashed file is re-read by the worker during the copy",
+              sorted(worker_reads) == ["A.braw", "B.braw", "C.braw"], str(worker_reads))
+        check("overlapped: the end pass has nothing left and the re-read still counts",
+              not started and res.source_reread_ok is True and res.fully_verified,
+              f"started={started} ok={res.source_reread_ok} errors={res.errors[:2]}")
+
+        def bad_second_read(*a, **k):
+            got = real_cold(*a, **k)
+            if (type(threading.current_thread()).__name__ == "_SourceRereadWorker"
+                    and a[0] == "B.braw"):
+                return "0" * 16
+            return got
+
+        engine._cold_hash = bad_second_read
+        src2 = os.path.join(base, "CARD_OV2")
+        make_card(src2, {"A.braw": 4096, "B.braw": 4096})
+        d2 = os.path.join(base, "D_OV2"); os.makedirs(d2)
+        ev2 = []
+        res2 = engine.offload(src2, [d2], label="CARD_OV2", event=ev2.append)
+        check("overlapped: a bad second read is caught as SOURCE INCONSISTENT",
+              res2.source_reread_ok is False
+              and any("B.braw: SOURCE INCONSISTENT" in e for e in res2.errors)
+              and any(e.get("event") == "source_inconsistent" for e in ev2),
+              str(res2.errors[:2]))
+
+        # A card slower than the drives leaves re-reads after the last verify:
+        # the wait must show as the re-read phase with progress, never as
+        # silence the app reads as a stalled drive (Codex review, PR 39).
+        def slow_second_read(*a, **k):
+            if type(threading.current_thread()).__name__ == "_SourceRereadWorker":
+                time.sleep(1.5)
+            return real_cold(*a, **k)
+
+        engine._cold_hash = slow_second_read
+        src5 = os.path.join(base, "CARD_OV5")
+        make_card(src5, {"A.braw": 4096, "B.braw": 4096})
+        d5 = os.path.join(base, "D_OV5"); os.makedirs(d5)
+        ev5 = []
+        res5 = engine.offload(src5, [d5], label="CARD_OV5", event=ev5.append)
+        names5 = [e.get("event") for e in ev5]
+        prog5 = [e for e in ev5 if e.get("event") == "source_reread_progress"]
+        check("overlapped: a lagging second read reports the re-read phase before finalizing",
+              "source_reread_started" in names5 and "finalizing" in names5
+              and names5.index("source_reread_started") < names5.index("finalizing")
+              and prog5 and prog5[-1]["done"] == prog5[-1]["total"] > 0
+              and res5.source_reread_ok is True,
+              f"events={[n for n in names5 if 'reread' in n or n == 'finalizing']} "
+              f"last={prog5[-1:] } ok={res5.source_reread_ok}")
+
+        # A sink that raises a BaseException during that drain must still
+        # leave no worker reading the card after offload() returns (Sol
+        # review, PR 39).
+        class _Cancelled(BaseException):
+            pass
+
+        def cancel_on_drain(evt):
+            if evt.get("event") == "source_reread_started":
+                raise _Cancelled()
+
+        src6 = os.path.join(base, "CARD_OV6")
+        make_card(src6, {"A.braw": 4096, "B.braw": 4096})
+        d6 = os.path.join(base, "D_OV6"); os.makedirs(d6)
+        try:
+            engine.offload(src6, [d6], label="CARD_OV6", event=cancel_on_drain)
+            raised6 = False
+        except _Cancelled:
+            raised6 = True
+        live6 = [t for t in threading.enumerate()
+                 if type(t).__name__ == "_SourceRereadWorker" and t.is_alive()]
+        check("overlapped: a BaseException during the drain still joins the worker",
+              raised6 and not live6, f"raised={raised6} live={live6}")
+        for t in live6:
+            t.join(timeout=10)
+
+        # Ctrl-C while the job waits on a slow card re-read cancels the
+        # remaining reads promptly instead of waiting them out (Codex
+        # review, PR 39); the worker is still joined before return.
+        import signal as _signal
+        src7 = os.path.join(base, "CARD_OV7")
+        make_card(src7, {f"F{i}.braw": 4096 for i in range(6)})
+        d7 = os.path.join(base, "D_OV7"); os.makedirs(d7)
+        sent7 = {}
+
+        def interrupt_on_drain(evt):
+            if evt.get("event") == "source_reread_started" and "t" not in sent7:
+                sent7["t"] = time.monotonic()
+                os.kill(os.getpid(), _signal.SIGINT)
+
+        try:
+            engine.offload(src7, [d7], label="CARD_OV7", event=interrupt_on_drain)
+            raised7 = False
+        except KeyboardInterrupt:
+            raised7 = True
+        waited7 = time.monotonic() - sent7.get("t", time.monotonic())
+        live7 = [t for t in threading.enumerate()
+                 if type(t).__name__ == "_SourceRereadWorker" and t.is_alive()]
+        check("overlapped: Ctrl-C during the re-read wait cancels it promptly",
+              raised7 and "t" in sent7 and waited7 < 4.0 and not live7,
+              f"raised={raised7} waited={waited7:.1f}s live={live7}")
+        for t in live7:
+            t.join(timeout=15)
+
+        engine._cold_hash = real_cold
+        # Overlap took the re-read off the end, not the end-of-job identity
+        # checks: a source swapped for its own copy after the drain still
+        # voids the proof.
+        src4, d4 = os.path.join(base, "CARD_OV4"), os.path.join(base, "D_OV4")
+        os.makedirs(d4)
+        make_card(src4, {"A.braw": 4096})
+        swapped4 = {"done": False}
+
+        def swap_at_finalizing(evt):
+            if evt.get("event") == "finalizing" and not swapped4["done"]:
+                swapped4["done"] = True
+                os.rename(src4, src4 + ".real")
+                os.symlink(os.path.join(d4, "CARD_OV4"), src4)
+
+        res4 = engine.offload(src4, [d4], label="CARD_OV4", event=swap_at_finalizing)
+        try:
+            check("overlapped: a source swapped after the drain still fails the job",
+                  swapped4["done"] and not res4.ok
+                  and any("source changed identity" in e for e in res4.errors)
+                  and not res4.attestation()["safe_to_wipe_source"],
+                  str(res4.errors)[:300])
+        finally:
+            os.remove(src4)
+            os.rename(src4 + ".real", src4)
+
+        os.environ["DUMPTRUCK_OVERLAP_REREAD"] = "0"
+        src3 = os.path.join(base, "CARD_OV3")
+        make_card(src3, {"A.braw": 4096})
+        d3 = os.path.join(base, "D_OV3"); os.makedirs(d3)
+        ev3 = []
+        res3 = engine.offload(src3, [d3], label="CARD_OV3", event=ev3.append)
+        check("overlap off: the end-of-job pass runs as before",
+              any(e.get("event") == "source_reread_started" for e in ev3)
+              and res3.source_reread_ok is True, str(res3.errors[:2]))
+    finally:
+        engine._cold_hash = real_cold
+        if saved is None:
+            os.environ.pop("DUMPTRUCK_OVERLAP_REREAD", None)
+        else:
+            os.environ["DUMPTRUCK_OVERLAP_REREAD"] = saved
 
 
 def scenario_source_watcher_junk_matches_engine():
@@ -2354,10 +2647,14 @@ def main():
     try:
         _macio.physical_stores = lambda p: (frozenset({"disk33a"})
                                              if "D33A" in p else frozenset({"disk33b"}))
+        # This exercises the end-of-job re-read window, so the second read
+        # must not have been overlapped with the copy.
+        os.environ["DUMPTRUCK_OVERLAP_REREAD"] = "0"
         res33 = engine.offload(src33, [d33a, d33b], label="CARD33",
                                event=_delete_after_reread)
         att33 = res33.attestation()
     finally:
+        os.environ.pop("DUMPTRUCK_OVERLAP_REREAD", None)
         _macio.physical_stores = real_stores33
     check("deleted source file marks the tree changed and refuses wipe",
           deleted33["done"] and res33.source_grew_after_scan
@@ -2673,7 +2970,12 @@ def main():
             swapped43["done"] = True
             os.rename(src43, src43 + ".real")
             os.symlink(os.path.join(d43, "CARD43"), src43)
-    res43 = engine.offload(src43, [d43], label="CARD43", event=_swap_source)
+    # The swap rides the end-of-job re-read event: run that pass.
+    os.environ["DUMPTRUCK_OVERLAP_REREAD"] = "0"
+    try:
+        res43 = engine.offload(src43, [d43], label="CARD43", event=_swap_source)
+    finally:
+        os.environ.pop("DUMPTRUCK_OVERLAP_REREAD", None)
     try:
         check("re-read against a swapped source fails the job",
               swapped43["done"] and not res43.ok
@@ -4082,6 +4384,8 @@ except OSError:
     scenario_case_sensitive_destinations(base)
     scenario_source_reread_after_drain(base)
     scenario_verify_heartbeat(base)
+    scenario_file_done_identity(base)
+    scenario_overlapped_source_reread(base)
     scenario_source_watcher_junk_matches_engine()
     scenario_flush_failure_names_the_volume(base)
 

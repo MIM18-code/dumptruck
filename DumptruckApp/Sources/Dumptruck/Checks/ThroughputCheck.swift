@@ -738,7 +738,7 @@ require(VerificationLevel.classify(VerificationLevel.standardValues) == .standar
         && VerificationLevel.classify(VerificationLevel.maximumValues) == .maximum,
         "verification levels do not round-trip through classify")
 require(VerificationLevel.standardValues.verifyMode == "full"
-        && VerificationLevel.standardValues.sourceReread
+        && !VerificationLevel.standardValues.sourceReread
         && VerificationLevel.maximumValues.verifyMode == "full"
         && VerificationLevel.maximumValues.sourceReread
         && VerificationLevel.maximumValues.reverifyExisting,

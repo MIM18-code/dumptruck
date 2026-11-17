@@ -3,11 +3,13 @@
 Run:  .venv/bin/python tests/cards_and_identity.py
 """
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -187,6 +189,41 @@ def identity_tests(base):
     check("renamed label remembered on re-insert", code == 0 and "'GOPRO_ROOF'" in out, out[:300])
 
 
+def recorder_rewrite_tests(base):
+    print("[recorder-rewritten files]")
+    env = {"DUMPTRUCK_HOME": os.path.join(base, "dthome_sd")}
+    src = os.path.join(base, "MIXPRE")
+    d1, d2 = os.path.join(base, "SD_A"), os.path.join(base, "SD_B")
+    os.makedirs(d1), os.makedirs(d2)
+    touch(src, "HJM/.SD_PROJECT", 1)
+    touch(src, "HJM/TR-001.WAV", 64 * 1024)
+    touch(src, "SOUNDDEV/SDINFO.TXT", 24)
+    old = time.time() - 3600
+    for rel in ("HJM/.SD_PROJECT", "HJM/TR-001.WAV", "SOUNDDEV/SDINFO.TXT"):
+        os.utime(os.path.join(src, rel), (old, old))
+    code, out = cli(env, "offload", src, d1, d2, "--label", "MixPre")
+    check("sound card first offload", code == 0, out[:300])
+    # A record written before this fix anchored SDINFO.TXT too.
+    db_path = os.path.join(env["DUMPTRUCK_HOME"], "datasets.json")
+    db = json.load(open(db_path))
+    db["datasets"][-1]["anchors"].append(["SOUNDDEV/SDINFO.TXT", 24, int(old)])
+    json.dump(db, open(db_path, "w"))
+    # The recorder records again: a new take, and SDINFO.TXT rewritten.
+    touch(src, "HJM/TR-002.WAV", 32 * 1024)
+    with open(os.path.join(src, "SOUNDDEV/SDINFO.TXT"), "wb") as f:
+        f.write(b"x" * 24)
+    code, out = cli(env, "offload", src, d1, d2)
+    check("topped-up recorder card continues into its own folder",
+          code == 0 and "Continuing into existing card folder" in out
+          and os.path.isfile(os.path.join(d1, "MixPre", "HJM", "TR-002.WAV"))
+          and not os.path.exists(os.path.join(d1, "MixPre_2")), out[:400])
+    # A changed recording still means a different card.
+    with open(os.path.join(src, "HJM/TR-001.WAV"), "ab") as f:
+        f.write(b"y")
+    code, out = cli(env, "offload", src, d1, d2, "--label", "MixPre")
+    check("a changed take is still not the same card", code == 2 and "REFUSED" in out, out[:400])
+
+
 def pulled_card_tests(base):
     """A card pulled mid-copy is still itself when it comes back: its retry
     goes into the folder it half-filled (soak pass, 2026-11-12)."""
@@ -235,6 +272,7 @@ def main():
     print(f"arena: {base}\n")
     detection_tests(base)
     identity_tests(base)
+    recorder_rewrite_tests(base)
     pulled_card_tests(base)
     print(f"\n{'='*50}\n{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:

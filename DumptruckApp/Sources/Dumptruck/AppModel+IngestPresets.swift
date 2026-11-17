@@ -14,8 +14,7 @@ extension AppModel {
             folderTemplate: defaults.string(forKey: Pref.folderTemplate) ?? "",
             projectName: defaults.string(forKey: Pref.projectName) ?? "",
             verifyMode: defaults.string(forKey: Pref.verifyMode) ?? "full",
-            sourceReread: defaults.object(forKey: Pref.sourceReread) == nil
-                || defaults.bool(forKey: Pref.sourceReread),
+            sourceReread: defaults.bool(forKey: Pref.sourceReread),
             reverifyExisting: defaults.bool(forKey: Pref.reverifyExisting),
             extraHashes: defaults.string(forKey: Pref.extraHashes) ?? "",
             makeReports: defaults.object(forKey: Pref.makeReports) == nil
