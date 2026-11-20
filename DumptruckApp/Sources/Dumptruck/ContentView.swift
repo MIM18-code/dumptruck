@@ -102,7 +102,10 @@ struct ContentView: View {
                 }
                     // Brand amber, not the system accent: the one loud thing
                     // in the chrome (2026-08-26 facelift).
-                    .buttonStyle(BrandProminentButtonStyle())
+                    // Dimmed, not disabled, when nothing can start: it read
+                    // as ready beside three running cards with nothing
+                    // staged (Joshua, 2026-11-17). A click still explains.
+                    .buttonStyle(BrandProminentButtonStyle(dimmed: model.toolbarStartBlockedReason != nil))
                     .keyboardShortcut(.defaultAction)
                     .help(model.toolbarStartBlockedReason
                           ?? (model.startRunsBatch ? "Start the batch: copy + verify every card"

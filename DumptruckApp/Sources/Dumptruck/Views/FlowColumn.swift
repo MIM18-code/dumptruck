@@ -1444,21 +1444,29 @@ struct JobHeaderBand: View {
                 // roll never finishes, and screenshots caught "5_ / 129" and
                 // "4_%" mid-roll beside 57 verified files and 45% of bytes
                 // (Codex GUI review of 0.5.10).
-                Text(Job.copyFilesLine(copied: job.filesCopied, alreadyOffloaded: job.filesSkipped,
-                                       total: job.filesTotal))
-                Text("·")
-                // No rolling digits on the copy counter: the engine reports
-                // per 4 MiB chunk, hundreds of updates/sec on fast media —
-                // a 250ms roll would never complete (codex review). The
-                // once-per-second re-read counter below does roll.
-                Text("\(bytesString(job.displayedBytesDone)) of \(bytesString(job.bytesTotal))")
+                if job.onlyCheckingCopies {
+                    // The card is read; "0 of 1 file done · 100%" read as
+                    // stuck while both drives read a long clip back.
+                    Text("card copied · checking the copies")
+                } else {
+                    Text(Job.copyFilesLine(copied: job.filesCopied, alreadyOffloaded: job.filesSkipped,
+                                           total: job.filesTotal))
+                    Text("·")
+                    // No rolling digits on the copy counter: the engine reports
+                    // per 4 MiB chunk, hundreds of updates/sec on fast media —
+                    // a 250ms roll would never complete (codex review). The
+                    // once-per-second re-read counter below does roll.
+                    Text("\(bytesString(job.displayedBytesDone)) of \(bytesString(job.bytesTotal))")
+                }
                 Spacer()
                 // No ETA while paused: nothing is moving toward it.
                 if !job.isPaused, let secs = copyETASeconds {
                     ETAReadout(secondsRemaining: secs)
                         .id(job.phase)
                 }
-                Text("\(Int(job.fraction * 100))%")
+                if !job.onlyCheckingCopies {
+                    Text("\(Int(job.fraction * 100))%")
+                }
             }
             .font(Typo.evidenceQuiet.monospacedDigit()).foregroundStyle(.secondary)
             if showsSpeedRow { speedometerRow }
@@ -1933,6 +1941,8 @@ struct JobHeaderBand: View {
             ejectLabel: ejectableSourceLabel,
             reportPath: shownReportPath,
             canRetry: job.launchPlanSnapshot != nil,
+            retryRefusal: model.retryRefusals[job.id],
+            dismissRetryRefusal: { [job, model] in model.dismissRetryRefusal(job.id) },
             eject: { [job, model] in
                 // Re-validate at CLICK time: a continuation may have started
                 // since this row rendered (Ox review, F1 — the notification
@@ -2088,7 +2098,11 @@ struct DestinationLane: View {
         // alone can't reach 1.0 on a continuation.
         if !job.isRunning, job.fullyVerified, progress.filesFailed == 0 { return 1 }
         guard job.bytesTotal > 0 else { return 0 }
-        return min(1, Double(progress.completionBytes) / Double(job.bytesTotal))
+        // While running, bytes already read back move the bar too, so a long
+        // clip's check shows motion. The running tint keeps it from reading
+        // as verified; the caption says what is settled.
+        let shown = job.isRunning ? job.readBackBytes(root) : progress.completionBytes
+        return min(1, Double(shown) / Double(job.bytesTotal))
     }
 
     private var state: LaneTrack.LaneState {
@@ -2128,16 +2142,30 @@ struct DestinationLane: View {
             }
             if progress.sizeOnly > 0 { parts.append("\(progress.sizeOnly) copied, size-checked") }
             if progress.filesFailed > 0 { parts.append("\(progress.filesFailed) FAILED") }
+            if job.isRunning, let checking = readBackLine { parts.append(checking) }
             if job.stopRequested, !job.isRunning {
                 parts.append("stopped")
             } else if parts.isEmpty {
-                parts.append(job.isRunning ? "waiting…" : "no results recorded")
+                parts.append(job.isRunning ? (job.phase == .copying ? "writing…" : "waiting…")
+                                           : "no results recorded")
             }
             // Capacity outranks relative-speed commentary (agy audit 9).
             if let warning = lowSpaceWarning { parts.append(warning) }
             if isSlowest { parts.append("slowest destination") }
         } 
         return parts.joined(separator: " · ")
+    }
+
+    /// "checking 12.3 GB of 54.6 GB" for the file this lane is reading
+    /// back, or "checked, finishing" once its read-back reached the end.
+    private var readBackLine: String? {
+        guard let files = job.readBackInFlight[root], !files.isEmpty else { return nil }
+        let sizes = job.fileSizesForReadBack(Array(files.keys))
+        let open = files.filter { path, done in done < (sizes[path] ?? Int64.max) }
+        if let (path, done) = open.max(by: { $0.value < $1.value }), let size = sizes[path] {
+            return "checking \(bytesString(done)) of \(bytesString(size))"
+        }
+        return "checked, finishing"
     }
 
     var body: some View {
@@ -2466,6 +2494,9 @@ private struct ReceiptActionRow: View, Equatable {
     let ejectLabel: String?
     let reportPath: String?
     let canRetry: Bool
+    /// Why the last Stage Retry click here was refused, shown on this card.
+    let retryRefusal: String?
+    let dismissRetryRefusal: () -> Void
     let eject: () -> Void
     let showEvidence: () -> Void
     let quickLook: (String) -> Void
@@ -2474,9 +2505,33 @@ private struct ReceiptActionRow: View, Equatable {
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.jobID == rhs.jobID && lhs.ejectLabel == rhs.ejectLabel
             && lhs.reportPath == rhs.reportPath && lhs.canRetry == rhs.canRetry
+            && lhs.retryRefusal == rhs.retryRefusal
     }
 
     var body: some View {
+        VStack(alignment: .trailing, spacing: 6) {
+            buttons
+            if let retryRefusal {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Label(retryRefusal, systemImage: "exclamationmark.triangle.fill")
+                        .font(Typo.safety)
+                        .foregroundStyle(Semantics.warningText)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(action: dismissRetryRefusal) {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(HoverHighlightButtonStyle())
+                    .foregroundStyle(.secondary)
+                    .help("Dismiss this message")
+                    .accessibilityLabel("Dismiss retry message")
+                }
+                .accessibilityElement(children: .contain)
+            }
+        }
+    }
+
+    private var buttons: some View {
         // Four fixed-size controls want ~458pt; the 440pt center minimum
         // leaves ~384pt after card padding (codex + opus review of the
         // 2026-09-04 audit commit). Fall back to two rows rather than
@@ -2564,7 +2619,7 @@ private struct ReceiptActionRow: View, Equatable {
             }
             .controlSize(.small)
             .fixedSize()
-            .help("Restore the original source, destinations, and rendered folder; Start remains manual")
+            .help("Restore the original source, destinations, and rendered folder. With current settings the retry copies what is missing and re-reads the copies already there; Start remains manual")
         }
     }
 }

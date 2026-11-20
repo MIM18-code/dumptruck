@@ -1999,7 +1999,9 @@ class _VerifyCommitWorker(threading.Thread):
                 # only: a failing event sink must never fail the verify.
                 beat["done"] += n
                 now = time.monotonic()
-                if now - beat["last_emit_time"] < 1.0:
+                # The last read always reports, so a drive that finishes
+                # before the other doesn't look stuck short of the end.
+                if now - beat["last_emit_time"] < 1.0 and beat["done"] < entry.size:
                     return
                 beat["last_emit_time"] = now
                 try:

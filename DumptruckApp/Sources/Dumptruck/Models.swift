@@ -320,6 +320,10 @@ final class Job: ObservableObject, Identifiable {
             // starts its clock now.
             phaseStartTime = start <= began ? start.addingTimeInterval(gap) : now
         }
+        for (root, start) in readBackStart {
+            readBackStart[root] = (start.time <= began ? start.time.addingTimeInterval(gap) : now,
+                                   start.bytes)
+        }
         if speedBaselineTime != nil {
             speedBaselineTime = now
             speedBaselineBytes = speedCounterBytes
@@ -464,6 +468,15 @@ final class Job: ObservableObject, Identifiable {
     /// Source reads are paused but the engine is reading copies back to
     /// verify them. The speed readout says so instead of "waiting for I/O".
     @Published var verifyingCopies: Bool = false
+    /// Bytes read back so far for files whose check hasn't finished, per
+    /// lane: [card root: [path: bytes]], from verify_progress. Display only:
+    /// it moves the lane bar, its caption and the estimate, and never a
+    /// verdict or a verified count. A 54 GB clip showed "0 of 1 file done",
+    /// empty lanes and "waiting…" for 20 minutes while both drives read it
+    /// back (Joshua, 2026-11-17).
+    @Published private(set) var readBackInFlight: [String: [String: Int64]] = [:]
+    private var readBackStart: [String: (time: Date, bytes: Int64)] = [:]
+    private var readBackSizes: [String: Int64] = [:]
     private var lastPipelineActivity: Date?
     private var stallCarry: TimeInterval = 0
     private var throttleCarry: TimeInterval = 0
@@ -531,7 +544,7 @@ final class Job: ObservableObject, Identifiable {
             speedBaselineTime = now
             phaseStartBytes = totalBytes
             phaseStartTime = now
-            phaseStartFiles = filesFinished
+            phaseStartFiles = filesReadOffCard
             currentSpeed = 0
             speedHistory.removeAll(keepingCapacity: true)
             resetEscalators()
@@ -548,7 +561,7 @@ final class Job: ObservableObject, Identifiable {
             speedBaselineTime = now
             phaseStartBytes = totalBytes
             phaseStartTime = now
-            phaseStartFiles = filesFinished
+            phaseStartFiles = filesReadOffCard
             currentSpeed = 0
             return
         }
@@ -657,6 +670,61 @@ final class Job: ObservableObject, Identifiable {
         stallCarry = 0
         if stallSeconds != 0 { stallSeconds = 0 }
         if verifyingCopy, !verifyingCopies { verifyingCopies = true }
+    }
+
+    func noteReadBack(root: String, path: String, done: Int64, size: Int64,
+                      at now: Date = Date()) {
+        if readBackStart[root] == nil {
+            readBackStart[root] = (now, readBackBytes(root))
+        }
+        readBackSizes[path] = max(0, size)
+        readBackInFlight[root, default: [:]][path] = max(0, min(done, size))
+    }
+
+    func fileSizesForReadBack(_ paths: [String]) -> [String: Int64] {
+        var out: [String: Int64] = [:]
+        for path in paths { out[path] = readBackSizes[path] }
+        return out
+    }
+
+    /// A file's done event settles it on every lane: its bytes now count
+    /// through destProgress, so its in-flight entry goes.
+    func finishReadBack(path: String) {
+        for root in readBackInFlight.keys where readBackInFlight[root]?[path] != nil {
+            readBackInFlight[root]?[path] = nil
+            if readBackInFlight[root]?.isEmpty == true { readBackInFlight[root] = nil }
+        }
+        readBackSizes[path] = nil
+    }
+
+    /// Bytes on this lane that are settled or already read back.
+    func readBackBytes(_ root: String) -> Int64 {
+        let settled = destProgress[root]?.completionBytes ?? 0
+        let inFlight = readBackInFlight[root]?.values.reduce(0, +) ?? 0
+        let (sum, overflow) = settled.addingReportingOverflow(inFlight)
+        return overflow ? Int64.max : sum
+    }
+
+    /// Seconds until the slowest lane has read everything back, from each
+    /// lane's own read-back rate. nil until a lane has 5 s of evidence.
+    func readBackETASeconds(at now: Date = Date()) -> Int? {
+        var worst: Int?
+        for root in laneRoots {
+            guard let start = readBackStart[root] else { continue }
+            let elapsed = (pausedAt ?? now).timeIntervalSince(start.time)
+            let done = readBackBytes(root)
+            guard elapsed >= 5, done > start.bytes, bytesTotal > done else { continue }
+            let rate = Double(done - start.bytes) / elapsed
+            let eta = Int(Double(bytesTotal - done) / rate)
+            worst = max(worst ?? 0, eta)
+        }
+        return worst
+    }
+
+    /// The card is fully read and only the drive checks are left.
+    var onlyCheckingCopies: Bool {
+        phase == .copying && bytesTotal > 0 && copySourceBytesAccounted >= bytesTotal
+            && !readBackInFlight.isEmpty
     }
 
     /// The engine emits a verify heartbeat at most once a second per
@@ -1070,6 +1138,19 @@ final class Job: ObservableObject, Identifiable {
     /// Every file the engine has settled this run, whatever the outcome.
     var filesFinished: Int { filesCopied + filesSkipped + filesFailed }
 
+    /// Files the copy pass has opened (file_started).
+    var filesStarted = 0
+
+    /// Files read off the card: every started file but the one in flight,
+    /// or every settled file when that is more. The file-rate estimate
+    /// counted settled files only, and settling waits on both drives'
+    /// read-back, so with drives behind a card of 8 big clips read "209 min
+    /// left" while the card itself had 30 to go (Joshua, 2026-11-17).
+    var filesReadOffCard: Int {
+        let readSoFar = copySourceBytesAccounted >= bytesTotal ? filesStarted : max(0, filesStarted - 1)
+        return max(filesFinished, readSoFar)
+    }
+
     /// Files settled per second since the phase began, same cumulative
     /// discipline as the byte rate. The byte rate is blind to per-file
     /// work: one 16 GiB file beside 60,000 small ones put bytes at 99% and
@@ -1079,7 +1160,7 @@ final class Job: ObservableObject, Identifiable {
         guard let start = phaseStartTime else { return nil }
         let elapsed = (pausedAt ?? now).timeIntervalSince(start)
         guard elapsed >= 3 else { return nil }
-        let delta = filesFinished - phaseStartFiles
+        let delta = filesReadOffCard - phaseStartFiles
         guard delta > 0 else { return nil }
         return Double(delta) / elapsed
     }
@@ -1098,12 +1179,15 @@ final class Job: ObservableObject, Identifiable {
             byteETA = Int(Double(bytesTotal - done) / rate)
         }
         var fileETA: Int?
-        let remainingFiles = filesTotal - filesFinished
+        let remainingFiles = filesTotal - filesReadOffCard
         if let rate = fileRate(at: now), rate > 0, remainingFiles > 0 {
             fileETA = Int(Double(remainingFiles) / rate)
         }
-        guard byteETA != nil || fileETA != nil else { return nil }
-        return max(byteETA ?? 0, fileETA ?? 0)
+        // The copy pass ends before the drives finish reading back, so the
+        // slowest lane's read-back sets the finish too.
+        let readBackETA = readBackETASeconds(at: now)
+        guard byteETA != nil || fileETA != nil || readBackETA != nil else { return nil }
+        return max(byteETA ?? 0, fileETA ?? 0, readBackETA ?? 0)
     }
 }
 

@@ -783,6 +783,58 @@ bulky.filesCopied = 1
 let bulkyETA = bulky.copyETASeconds(at: t0.addingTimeInterval(10))
 require(bulkyETA == 20, "2 GiB left at 0.1 GiB/s is 20 s, not the 10 s the file count says: \(String(describing: bulkyETA))")
 
+// A 54 GB clip fully read off the card while both drives read it back
+// (Joshua, 2026-11-17): the estimate comes from the slower drive's
+// read-back rate, the lanes count bytes read back, and a file's done event
+// settles them.
+let longClip = Job(label: "A007", sourcePath: "/source", destinations: ["/A", "/B"])
+let clipSize: Int64 = 54_000_000_000
+longClip.filesTotal = 1
+longClip.bytesTotal = clipSize
+longClip.laneRoots = ["/A/A007", "/B/A007"]
+longClip.phase = .copying
+longClip.recordThroughput(0, phase: "copy", at: t0)
+longClip.recordCopyProgress(path: "C001.mov", done: clipSize)
+longClip.recordThroughput(longClip.copyBytesRead, phase: "copy", at: t0.addingTimeInterval(200))
+longClip.noteReadBack(root: "/A/A007", path: "C001.mov", done: 0, size: clipSize, at: t0.addingTimeInterval(200))
+longClip.noteReadBack(root: "/B/A007", path: "C001.mov", done: 0, size: clipSize, at: t0.addingTimeInterval(200))
+longClip.noteReadBack(root: "/A/A007", path: "C001.mov", done: clipSize, size: clipSize, at: t0.addingTimeInterval(300))
+longClip.noteReadBack(root: "/B/A007", path: "C001.mov", done: 18_000_000_000, size: clipSize, at: t0.addingTimeInterval(300))
+require(longClip.onlyCheckingCopies, "a fully read card with copies reading back is the checking stage")
+require(longClip.readBackBytes("/B/A007") == 18_000_000_000, "a lane counts bytes it has read back")
+let checkETA = longClip.copyETASeconds(at: t0.addingTimeInterval(300))
+require(checkETA == 200,
+        "36 GB left at 0.18 GB/s on the slower drive is 200 s: \(String(describing: checkETA))")
+// A pause doesn't count as slow read-back: ten paused minutes leave the
+// estimate where it was.
+longClip.markPaused(at: t0.addingTimeInterval(300))
+longClip.markResumed(at: t0.addingTimeInterval(900))
+let afterPause = longClip.readBackETASeconds(at: t0.addingTimeInterval(900))
+require(afterPause == 200, "a pause inflated the read-back estimate: \(String(describing: afterPause))")
+longClip.finishReadBack(path: "C001.mov")
+longClip.recordDestinationStatus(root: "/A/A007", status: "verified", bytes: clipSize)
+longClip.recordDestinationStatus(root: "/B/A007", status: "verified", bytes: clipSize)
+require(longClip.readBackInFlight.values.allSatisfy { $0.isEmpty } && !longClip.onlyCheckingCopies,
+        "a file's done event settles its read-back on every lane")
+require(longClip.readBackBytes("/B/A007") == clipSize, "settled bytes still count after the read-back clears")
+
+// Eight big clips with the drives' read-back behind the copy: one file
+// settled in 30 minutes while four were read off the card. The estimate
+// follows the card (four clips left at that pace), not the settled count
+// (seven left, "209 min").
+let eightClips = Job(label: "C003", sourcePath: "/source", destinations: ["/A", "/B"])
+eightClips.filesTotal = 8
+eightClips.bytesTotal = 220_000_000_000
+eightClips.phase = .copying
+eightClips.recordThroughput(0, phase: "copy", at: t0)
+eightClips.filesStarted = 5
+eightClips.recordCopyProgress(path: "C005.mov", done: 112_000_000_000)
+eightClips.recordThroughput(eightClips.copyBytesRead, phase: "copy", at: t0.addingTimeInterval(1800))
+eightClips.filesCopied = 1
+let eightETA = eightClips.copyETASeconds(at: t0.addingTimeInterval(1800)) ?? 0
+require(eightETA >= 1700 && eightETA <= 1800,
+        "card pace says about 29 minutes, not hours: \(eightETA)")
+
 // A held finish must move forward once its clock has expired, even when
 // the proposed update remains inside the two-minute jitter band.
 var expiredHold = ETADisplayHold()

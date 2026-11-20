@@ -50,8 +50,9 @@ public enum CardFolderClaims {
         }
     }
 
-    /// True when `folder` holds at least one file. Finder's own litter does
-    /// not count; anything else does, manifests and reports included
+    /// True when `folder` holds at least one file. Finder's own litter and
+    /// the engine's junk (a failed run's lock and partials) do not count;
+    /// anything else does, manifests and reports included
     /// (`cli._occupied_card_folders`).
     static func holdsFiles(_ folder: String) -> Bool {
         let url = URL(fileURLWithPath: folder, isDirectory: true)
@@ -60,11 +61,12 @@ public enum CardFolderClaims {
             return false
         }
         for case let item as URL in walker {
+            let name = item.lastPathComponent
             if (try? item.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                if MutationEventFilter.isEngineJunk(name) { walker.skipDescendants() }
                 continue
             }
-            let name = item.lastPathComponent
-            if name == ".DS_Store" || name == ".localized" || name.hasPrefix("._") { continue }
+            if name == ".localized" || MutationEventFilter.isEngineJunk(name) { continue }
             return true
         }
         return false

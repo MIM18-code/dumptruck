@@ -647,6 +647,25 @@ private struct HistoryJobRow: View {
                 Spacer()
             }
             .padding(.top, 2)
+            if let refusal = model.retryRefusals[job.id] {
+                // Same per-card refusal as the workbench: a refused Stage
+                // Retry here must not look like a button that did nothing.
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Label(refusal, systemImage: "exclamationmark.triangle.fill")
+                        .font(Typo.safety)
+                        .foregroundStyle(Semantics.warningText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        model.dismissRetryRefusal(job.id)
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .buttonStyle(HoverHighlightButtonStyle())
+                    .foregroundStyle(.secondary)
+                    .help("Dismiss this message")
+                    .accessibilityLabel("Dismiss retry message")
+                }
+            }
         }
         .padding(12)
         .background(.background.secondary, in: .rect(cornerRadius: 8))

@@ -9,14 +9,21 @@ final class SourceMutationCallbackBox: @unchecked Sendable {
     let settled: @Sendable () -> Void
     let filter: MutationEventFilter?
     let judge: DestinationChangeJudge?
+    /// The watched path itself and its device id when the watcher started
+    /// (see SourceMutationMonitor.droppingOwnMount).
+    let watchedRoots: Set<String>
+    let watchedDevice: dev_t?
     private let lock = NSLock()
     private var mutationSeen = false
 
     init(filter: MutationEventFilter?, judge: DestinationChangeJudge?,
+         watchedRoots: Set<String> = [], watchedDevice: dev_t? = nil,
          settled: @escaping @Sendable () -> Void,
          handler: @escaping @Sendable () -> Void) {
         self.filter = filter
         self.judge = judge
+        self.watchedRoots = watchedRoots
+        self.watchedDevice = watchedDevice
         self.handler = handler
         self.settled = settled
         judge?.onCaptureFailed = { [weak self] in self?.fire() }
@@ -96,11 +103,61 @@ final class SourceMutationMonitor: @unchecked Sendable {
     /// passes `MutationEventFilter.destinationJunk` so a Finder visit to the
     /// verified lane (Reveal in Finder writes .DS_Store) is not mistaken
     /// for a damaged copy.
+    /// FSEvents flags that mean the change set is unknown, so the event
+    /// bypasses every filter and fails closed.
+    static let unknownChangeSet = FSEventStreamEventFlags(
+        kFSEventStreamEventFlagMustScanSubDirs
+            | kFSEventStreamEventFlagKernelDropped
+            | kFSEventStreamEventFlagUserDropped
+            | kFSEventStreamEventFlagRootChanged
+            | kFSEventStreamEventFlagMount
+            | kFSEventStreamEventFlagUnmount)
+
+    /// The roots a watcher on `path` treats as itself: the path as given
+    /// and with symlinks resolved, never with a trailing slash.
+    static func watchedRoots(for path: String) -> Set<String> {
+        Set([path, (path as NSString).resolvingSymlinksInPath].map {
+            $0.count > 1 && $0.hasSuffix("/") ? String($0.dropLast()) : $0
+        })
+    }
+
+    /// Drops the Mount notice FSEvents delivers for the watched volume
+    /// itself. A card that has just mounted gets one at its own root a
+    /// moment later, even on a stream created after the mount, and it said
+    /// "unknown change" to a job that pressed Start right away (Joshua,
+    /// 2026-11-19: A001 failed as "source changed after Start" 34 s in;
+    /// reproduced on a fresh exFAT disk image). Only a bare notice is
+    /// dropped: flags exactly Mount (IsDir allowed), path exactly the root,
+    /// and the root still the volume it was when the watcher started
+    /// (`rootIsSameVolume`), so another volume mounted over the path still
+    /// fires. A Mount below the root, or one carrying any other flag, is kept.
+    static func droppingOwnMount(paths: [String], flags: [FSEventStreamEventFlags],
+                                 watchedRoots: Set<String>,
+                                 rootIsSameVolume: (String) -> Bool)
+        -> [(path: String, flags: FSEventStreamEventFlags)] {
+        let mount = FSEventStreamEventFlags(kFSEventStreamEventFlagMount)
+        let bare = mount | FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir)
+        return zip(paths, flags).compactMap { path, flag in
+            let normalized = path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
+            let ownMount = flag & mount != 0 && flag & ~bare == 0
+                && watchedRoots.contains(normalized) && rootIsSameVolume(normalized)
+            return ownMount ? nil : (path, flag)
+        }
+    }
+
+    /// The device id of `path` now, nil when it cannot be read.
+    static func deviceID(of path: String) -> dev_t? {
+        var st = stat()
+        return stat(path, &st) == 0 ? st.st_dev : nil
+    }
+
     init?(path: String, filter: MutationEventFilter? = nil,
           judge: DestinationChangeJudge? = nil,
           settled: @escaping @Sendable () -> Void = {},
           handler: @escaping @Sendable () -> Void) {
         let callbackBox = SourceMutationCallbackBox(filter: filter, judge: judge,
+                                                    watchedRoots: Self.watchedRoots(for: path),
+                                                    watchedDevice: Self.deviceID(of: path),
                                                     settled: settled, handler: handler)
         self.callbackBox = callbackBox
         self.judge = judge
@@ -133,28 +190,33 @@ final class SourceMutationMonitor: @unchecked Sendable {
             kCFAllocatorDefault,
             { _, info, count, eventPaths, eventFlags, _ in
                 guard let info else { return }
+                let box = Unmanaged<SourceMutationCallbackBox>
+                    .fromOpaque(info)
+                    .takeUnretainedValue()
                 // UseCFTypes: eventPaths is a CFArray of CFString.
-                let paths = (unsafeBitCast(eventPaths, to: NSArray.self) as? [String]) ?? []
-                let unknownChangeSet = FSEventStreamEventFlags(
-                    kFSEventStreamEventFlagMustScanSubDirs
-                        | kFSEventStreamEventFlagKernelDropped
-                        | kFSEventStreamEventFlagUserDropped
-                        | kFSEventStreamEventFlagRootChanged
-                        | kFSEventStreamEventFlagMount
-                        | kFSEventStreamEventFlagUnmount)
-                let forced = (0..<count).contains { eventFlags[$0] & unknownChangeSet != 0 }
+                let allPaths = (unsafeBitCast(eventPaths, to: NSArray.self) as? [String]) ?? []
+                let kept = SourceMutationMonitor.droppingOwnMount(
+                    paths: allPaths, flags: (0..<count).map { eventFlags[$0] },
+                    watchedRoots: box.watchedRoots,
+                    rootIsSameVolume: { matched in
+                        // The path the notice named, re-read now.
+                        guard let start = box.watchedDevice,
+                              let now = SourceMutationMonitor.deviceID(of: matched) else { return false }
+                        return now == start
+                    })
+                // Nothing left means the burst was only this volume's own
+                // late mount notice: no change to judge.
+                if count > 0, kept.isEmpty { return }
+                let paths = kept.map(\.path)
+                let flags = kept.map(\.flags)
+                let forced = flags.contains { $0 & SourceMutationMonitor.unknownChangeSet != 0 }
                 let metadataFlags = FSEventStreamEventFlags(
                     kFSEventStreamEventFlagItemInodeMetaMod | kFSEventStreamEventFlagItemXattrMod
                     | kFSEventStreamEventFlagItemIsFile | kFSEventStreamEventFlagItemIsDir)
-                let eventMetadataOnly = (0..<count).map {
-                    eventFlags[$0] != 0 && eventFlags[$0] & ~metadataFlags == 0
-                }
-                let metadataOnly = count > 0 && eventMetadataOnly.allSatisfy { $0 }
-                Unmanaged<SourceMutationCallbackBox>
-                    .fromOpaque(info)
-                    .takeUnretainedValue()
-                    .receiveEvent(paths: paths, forced: forced, metadataOnly: metadataOnly,
-                                  eventMetadataOnly: eventMetadataOnly)
+                let eventMetadataOnly = flags.map { $0 != 0 && $0 & ~metadataFlags == 0 }
+                let metadataOnly = !flags.isEmpty && eventMetadataOnly.allSatisfy { $0 }
+                box.receiveEvent(paths: paths, forced: forced, metadataOnly: metadataOnly,
+                                 eventMetadataOnly: eventMetadataOnly)
             },
             &context,
             [path] as CFArray,

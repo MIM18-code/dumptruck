@@ -110,6 +110,9 @@ extension View {
 /// motion (hover-lift is a web-ism; Mac buttons respond with light).
 struct BrandProminentButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
+    /// Looks unavailable but stays clickable, for toolbar buttons that
+    /// can't use .disabled and explain themselves when clicked instead.
+    var dimmed = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -118,6 +121,6 @@ struct BrandProminentButtonStyle: ButtonStyle {
             .padding(.horizontal, 12).padding(.vertical, 5)
             .background(Brand.amber, in: .rect(cornerRadius: 8))
             .brightness(configuration.isPressed ? -0.08 : 0)
-            .opacity(isEnabled ? 1 : 0.4)
+            .opacity(isEnabled && !dimmed ? 1 : 0.4)
     }
 }

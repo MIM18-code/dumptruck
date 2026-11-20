@@ -311,16 +311,23 @@ _FINDER_LITTER = {".DS_Store", ".localized"}
 
 def _occupied_card_folders(destinations, label):
     """The card folders <dest>/<label> that already hold at least one file.
-    Finder litter and AppleDouble shadows do not count; anything else does,
-    manifests and reports included, because that is another card's custody
-    chain. A missing or empty folder is not footage."""
+    Finder litter, AppleDouble shadows and Dumptruck's own scratch (the job
+    lock and staged partials) do not count; anything else does, manifests
+    and reports included, because that is another card's custody chain. A
+    missing or empty folder is not footage.
+
+    A run that fails partway leaves its lock and a partial behind. Counting
+    those as footage refused the same card's retry when an older card had
+    once used the name (Joshua, 2026-11-19: A001 failed, then its retry was
+    told the folder "already holds another card's footage")."""
     occupied = []
     for dest in destinations:
         card_root = os.path.join(dest, label)
         if not os.path.isdir(card_root):
             continue
-        for _dirpath, _dirnames, filenames in os.walk(card_root):
-            if any(n not in _FINDER_LITTER and not n.startswith("._") for n in filenames):
+        for _dirpath, dirnames, filenames in os.walk(card_root):
+            dirnames[:] = [d for d in dirnames if not is_junk(d)]
+            if any(n not in _FINDER_LITTER and not is_junk(n) for n in filenames):
                 occupied.append(card_root)
                 break
     return occupied

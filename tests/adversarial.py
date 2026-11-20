@@ -769,6 +769,20 @@ def scenario_verify_heartbeat(base):
                   and b.get("done", 0) > 0 and b.get("size") == 4096 for b in beats),
           f"beats={beats[:2]} errors={res.errors[:2]}")
 
+    # A drive's last read always reports, even inside the one-second
+    # throttle, so a drive done before the other never looks short of the
+    # end in the app.
+    src3 = os.path.join(base, "CARD85C2")
+    make_card(src3, {"A.braw": 4096, "B.braw": 8192})
+    d3a = os.path.join(base, "D85C2A"); os.makedirs(d3a)
+    d3b = os.path.join(base, "D85C2B"); os.makedirs(d3b)
+    ends = []
+    res3 = engine.offload(src3, [d3a, d3b], label="CARD85C2", event=ends.append)
+    finals = {(e["path"], e["destination"]) for e in ends
+              if e.get("event") == "verify_progress" and e.get("done") == e.get("size")}
+    check("every file's read-back reports its end on every drive",
+          res3.fully_verified and len(finals) == 4, f"finals={sorted(finals)}")
+
     src2 = os.path.join(base, "CARD85D")
     make_card(src2, {"B.braw": 4096})
     d2 = os.path.join(base, "D85D"); os.makedirs(d2)
@@ -4299,6 +4313,26 @@ except OSError:
     check("a card that shares a name is refused at the folder the other card wrote",
           p82f.returncode != 0 and "refused_label_collision" in kinds82f
           and os.listdir(os.path.join(d82a, "OWNED82")) == ["old.mov"], str(kinds82f))
+    # A failed run leaves its lock and a staged partial in the card folder.
+    # That is Dumptruck's scratch, not another card's footage: the retry
+    # must not be refused (Joshua 2026-11-19, A001 retry after a failure).
+    d82g = os.path.join(base, "D82G")
+    os.makedirs(os.path.join(d82g, "OWNED82"))
+    open(os.path.join(d82g, "OWNED82", ".dumptruck-job.lock"), "w").close()
+    with open(os.path.join(d82g, "OWNED82",
+                           "clip one.mov.dumptruck-partial-99999-1"), "wb") as f:
+        f.write(b"y" * 4096)
+    p82g = subprocess.run(
+        [sys.executable, "-m", "dumptruck.cli", "offload", src82, d82g,
+         "--label", "OWNED82", "--json", "--no-report"],
+        capture_output=True, text=True, cwd=HERE, env=env82)
+    events82g = [json.loads(line) for line in p82g.stdout.splitlines() if line.strip()]
+    kinds82g = [e.get("event") for e in events82g]
+    check("a folder holding only a failed run's lock and partial is not footage",
+          p82g.returncode == 0 and "refused_label_collision" not in kinds82g
+          and (events82g[-1] if events82g else {}).get("fully_verified") is True
+          and os.path.isfile(os.path.join(d82g, "OWNED82", "clip one.mov")),
+          (p82g.stdout + p82g.stderr)[-600:])
 
     print("[83] root-locked macOS system folders with a -bad-N suffix are pruned, not fatal")
     src83 = os.path.join(base, "DRIVE83")

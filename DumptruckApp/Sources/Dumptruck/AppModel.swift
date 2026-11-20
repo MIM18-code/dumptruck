@@ -1800,6 +1800,23 @@ final class AppModel: ObservableObject {
     /// that looks like the original proof.
     @discardableResult
     func stageRetry(_ historical: Job) -> Bool {
+        let staged = stageRetryChecked(historical)
+        // The refusal goes on the card that was clicked. In the window
+        // banner alone, Stage Retry looked like a button that did nothing
+        // (Joshua, 2026-11-19: C001 while B001's retry held the Crucial).
+        retryRefusals[historical.id] = staged
+            ? nil : (lastSetupError ?? "This retry could not be staged.")
+        return staged
+    }
+
+    /// Why the last Stage Retry click on a card was refused, by job.
+    @Published private(set) var retryRefusals: [UUID: String] = [:]
+
+    func dismissRetryRefusal(_ jobID: UUID) {
+        retryRefusals[jobID] = nil
+    }
+
+    private func stageRetryChecked(_ historical: Job) -> Bool {
         // Never leave an older retry armed when a new staging request is
         // refused; otherwise a later Start could launch the wrong card.
         clearStagedRetry()
@@ -1819,7 +1836,7 @@ final class AppModel: ObservableObject {
             }
             return false
         }
-        if jobs.contains(where: { other in
+        if let busy = jobs.first(where: { other in
             other.isRunning && (
                 pathsOverlap(other.sourcePath, plan.src)
                 || other.destinations.contains { destination in
@@ -1828,7 +1845,12 @@ final class AppModel: ObservableObject {
                 }
             )
         }) {
-            lastSetupError = "A transfer is using this source or destination — wait for it to finish"
+            let shared = busy.destinations.first { destination in
+                plan.rawRoots.contains { pathsOverlap($0, destination) }
+            }
+            let what = shared.map(endpointName) ?? "this card"
+            lastSetupError = "\(busy.label) is still using \(what). "
+                + "Stage Retry again when it finishes."
             return false
         }
         // setSource deliberately mints a new assignment and starts a fresh
@@ -1932,7 +1954,9 @@ final class AppModel: ObservableObject {
         let d = UserDefaults.standard
         let fast = retryUsesCurrentSettings ? d.string(forKey: Pref.verifyMode) == "fast" : plan.args.contains("--fast")
         let reread = retryUsesCurrentSettings ? d.bool(forKey: Pref.sourceReread) : !plan.args.contains("--no-source-verify")
-        let existing = retryUsesCurrentSettings ? d.bool(forKey: Pref.reverifyExisting) : plan.args.contains("--reverify-existing")
+        // A current-settings retry always re-reads the copies already there
+        // (see currentEnginePlanForRetry).
+        let existing = retryUsesCurrentSettings || plan.args.contains("--reverify-existing")
         return "\(fast ? "Size check only" : "Full verification") · source reread \(reread ? "on" : "off") · existing copies \(existing ? "re-read" : "trusted")"
     }
 
@@ -1967,6 +1991,16 @@ final class AppModel: ObservableObject {
                     lastSetupError = "Retry destination changed. Reselect the folders."; return nil
                 }
                 retryArguments = fresh.args
+                // A retry re-reads the copies already on the drives. Trusting
+                // them finished B001's retry VERIFIED but never SAFE TO CLEAR,
+                // because the copy that survived the failed run was accepted
+                // on its earlier record instead of being read (Joshua,
+                // 2026-11-19: "it should retry verification"). The engine
+                // copies only what is missing and compares the rest against
+                // this run's read of the card.
+                if !retryArguments.contains("--reverify-existing") {
+                    retryArguments.append("--reverify-existing")
+                }
             }
         }
         return LaunchPlan(src: frozen.src, rawRoots: frozen.rawRoots,
@@ -4424,6 +4458,7 @@ final class AppModel: ObservableObject {
             job.currentFile = obj["path"] as? String ?? ""
             job.currentFileDone = 0
             job.noteFileActivity()
+            job.filesStarted += 1
         case "file_progress":
             // path and done are REQUIRED in protocol 3: a pathless event used
             // to charge its bytes to whatever file happened to be displayed
@@ -4461,6 +4496,7 @@ final class AppModel: ObservableObject {
                 // progress entry so 100k-file cards stay bounded (round-15
                 // PR review finding 4).
                 job.finishCopyProgress(path: donePath)
+                job.finishReadBack(path: donePath)
             }
             switch obj["outcome"] as? String {
             case "verified", "size-only": job.filesCopied += 1
@@ -4488,6 +4524,11 @@ final class AppModel: ObservableObject {
             // evidence, never counted into any total — it just tells the
             // stall readout the pipeline is moving.
             job.notePipelineActivity(verifyingCopy: true)
+            if let root = obj["destination"] as? String, let path = obj["path"] as? String,
+               let done = (obj["done"] as? NSNumber)?.int64Value,
+               let size = (obj["size"] as? NSNumber)?.int64Value {
+                job.noteReadBack(root: root, path: path, done: done, size: size)
+            }
         case "file_kept_both":
             // A different file already had this name, so the engine saved
             // this one beside it ("C0001_2.MP4") and verified it like any

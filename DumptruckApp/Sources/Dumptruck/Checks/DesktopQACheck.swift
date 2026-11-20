@@ -1,3 +1,4 @@
+import CoreServices
 import Foundation
 
 /// Regression checks for the Codex desktop QA of 2026-09-15.
@@ -270,6 +271,36 @@ enum DesktopQACheck {
         require(browseCallbacks.value == 4, "a path the filter cannot place under the card fails closed")
         browseBox.receiveEvent(paths: [cardRoot + "/PRIVATE/M4ROOT/CLIP/C0001.MP4"], forced: false)
         require(browseCallbacks.value == 5, "without per-event flags nothing is assumed metadata-only")
+        // A freshly mounted card gets a late Mount notice at its own root
+        // (Joshua, 2026-11-19, A001). That one is dropped; a Mount below the
+        // root, a Mount with another unknown-change flag, and an Unmount of
+        // the root all stay.
+        let mountFlag = FSEventStreamEventFlags(kFSEventStreamEventFlagMount)
+        let roots = SourceMutationMonitor.watchedRoots(for: cardRoot + "/")
+        require(roots.contains(cardRoot), "watched roots carry no trailing slash")
+        let isDirFlag = FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir)
+        require(SourceMutationMonitor.droppingOwnMount(
+                    paths: [cardRoot, cardRoot], flags: [mountFlag, mountFlag | isDirFlag],
+                    watchedRoots: roots, rootIsSameVolume: { _ in true }).isEmpty,
+                "the card's own late Mount notice is not a change")
+        require(SourceMutationMonitor.droppingOwnMount(
+                    paths: [cardRoot + "/"], flags: [mountFlag], watchedRoots: roots,
+                    rootIsSameVolume: { _ in true }).isEmpty,
+                "the own-mount match ignores a trailing slash")
+        require(SourceMutationMonitor.droppingOwnMount(
+                    paths: [cardRoot], flags: [mountFlag], watchedRoots: roots,
+                    rootIsSameVolume: { _ in false }).count == 1,
+                "a Mount at the root over a different volume still fires")
+        let keptMounts = SourceMutationMonitor.droppingOwnMount(
+            paths: [cardRoot + "/NESTED", cardRoot, cardRoot, cardRoot, cardRoot + "/CLIP.MP4"],
+            flags: [mountFlag,
+                    mountFlag | FSEventStreamEventFlags(kFSEventStreamEventFlagMustScanSubDirs),
+                    mountFlag | FSEventStreamEventFlags(kFSEventStreamEventFlagItemRenamed),
+                    FSEventStreamEventFlags(kFSEventStreamEventFlagUnmount),
+                    FSEventStreamEventFlags(kFSEventStreamEventFlagItemModified)],
+            watchedRoots: roots, rootIsSameVolume: { _ in true })
+        require(keptMounts.count == 5,
+                "a nested Mount, a Mount with any other flag, an Unmount and a write all stay")
         require(!sourceJunkFilter.isIgnorable(cardRoot + "/DS_Store_notes.txt")
                 && !sourceJunkFilter.isIgnorable(cardRoot + "/CLIP/.hidden_but_real.MP4"),
                 "only the engine's junk names are ignorable")
@@ -277,6 +308,15 @@ enum DesktopQACheck {
                                                   settled: {}, handler: {})
         forcedBox.receiveEvent(paths: [r3DestA + "/R3_SAFE/.DS_Store"], forced: true)
         require(forcedBox.hasSeenMutation, "unknown change sets bypass the junk filter")
+        // A failed run's lock and partial are not footage, so the app's
+        // naming agrees with the engine (Joshua, 2026-11-19, A001 retry).
+        let staleLane = root.appendingPathComponent("STALE/A001")
+        try fm.createDirectory(at: staleLane, withIntermediateDirectories: true)
+        try Data().write(to: staleLane.appendingPathComponent(".dumptruck-job.lock"))
+        try Data("x".utf8).write(to: staleLane.appendingPathComponent("C001.mov.dumptruck-partial-1-2"))
+        require(!CardFolderClaims.holdsFiles(staleLane.path), "a failed run's lock and partial are not footage")
+        try Data("x".utf8).write(to: staleLane.appendingPathComponent("C001.mov"))
+        require(CardFolderClaims.holdsFiles(staleLane.path), "a real clip beside them is footage")
         let hiddenParent = root.appendingPathComponent(".TemporaryItems/selected-lane")
         try fm.createDirectory(at: hiddenParent, withIntermediateDirectories: true)
         let hiddenClip = hiddenParent.appendingPathComponent("clip.mov")
@@ -362,7 +402,23 @@ enum DesktopQACheck {
         retryJob.phase = .done
         retryJob.launchPlanSnapshot = model.journalPlan(retryPlan)
         defaults.set(true, forKey: Pref.reverifyExisting)
+        // A refused Stage Retry says why on the card that was clicked
+        // (Joshua, 2026-11-19: the button looked like it did nothing).
+        // The incident: another job still writing the same drive.
+        let busy = Job(label: "BUSY", sourcePath: root.appendingPathComponent("OTHER").path,
+                       destinations: retryPlan.dests)
+        busy.phase = .copying
+        model.jobs.append(busy)
+        require(!model.stageRetry(retryJob), "a retry onto a drive another job is writing is refused")
+        let busyRefusal = model.retryRefusals[retryJob.id] ?? ""
+        require(busyRefusal.hasPrefix("BUSY is still using") && busyRefusal.contains("Stage Retry again"),
+                "the card names the busy job: \(busyRefusal)")
+        model.dismissRetryRefusal(retryJob.id)
+        require(model.retryRefusals[retryJob.id] == nil, "the card's refusal can be dismissed")
+        require(!model.stageRetry(retryJob), "still refused while the other job runs")
+        model.jobs.removeAll { $0.id == busy.id }
         require(model.stageRetry(retryJob), "retry fixture must stage")
+        require(model.retryRefusals[retryJob.id] == nil, "a staged retry clears the card's earlier refusal")
         require(model.retryUsesCurrentSettings, "retry should default to visible current settings")
         let currentRetry = model.currentEnginePlanForRetry(retryPlan)
         require(currentRetry?.args.contains("--reverify-existing") == true,
@@ -371,6 +427,14 @@ enum DesktopQACheck {
         require(currentRetry?.rootFileIDs == retryPlan.rootFileIDs
             && currentRetry?.srcFileID == retryPlan.srcFileID, "retry settings must preserve identity pins")
         require(model.retrySettingsSummary.contains("existing copies re-read"), "retry must describe its effective settings")
+        // A retry re-reads what is already there even with the preference
+        // off, so it can end SAFE (Joshua, 2026-11-19: B001's retry trusted
+        // the surviving copy and stopped at VERIFIED).
+        defaults.set(false, forKey: Pref.reverifyExisting)
+        require(model.currentEnginePlanForRetry(retryPlan)?.args.contains("--reverify-existing") == true,
+                "a current-settings retry re-reads existing copies even with the preference off")
+        require(model.retrySettingsSummary.contains("existing copies re-read"),
+                "the retry summary says existing copies are re-read")
         model.retryUsesCurrentSettings = false
         require(model.currentEnginePlanForRetry(retryPlan)?.args.contains("--reverify-existing") == false,
                 "explicit saved-settings choice must preserve original flags")
