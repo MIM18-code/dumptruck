@@ -1712,12 +1712,29 @@ def scenario_flush_failure_names_the_volume(base):
           and "network share, not counted as a drive: LOOP (SMB)" in doc,
           str(att["safe_to_wipe_blockers"]))
 
-    _r, att, doc, _ = _run({"RAID": local_a, "NAS": nas_hard})
-    check("a share whose plain fsync also fails still blocks and reads DEGRADED",
-          not att["safe_to_wipe_source"] and "DEGRADED" in doc
-          and any(b.startswith("full flush-to-media failed")
-                  and "plain fsync also failed (EIO)" in b
-                  for b in att["safe_to_wipe_blockers"]), str(att["safe_to_wipe_blockers"]))
+    r, att, doc, _ = _run({"RAID": local_a, "NAS": nas_hard})
+    nas_files = [f.dest_status.get(c) for f in r.files for c in f.dest_status if "/NAS/" in c + "/"]
+    check("a share whose plain fsync fails on a file fails that file, never verifies it",
+          not att["safe_to_wipe_source"] and not r.ok and not r.fully_verified
+          and nas_files and all(s == "failed" for s in nas_files)
+          and any("fsync: Input/output error" in e for e in r.errors),
+          f"{nas_files} {r.errors[:2]}")
+
+    local_hard = {"flush": (_errno.EIO, _errno.EIO), "stores": frozenset({"disk100h"}),
+                  "vol": ("/Volumes/HARD", "exfat", True, "/dev/disk8s1")}
+    r, att, doc, _ = _run({"RAID": local_a, "HARD": local_hard})
+    hard_root = next(c for f in r.files for c in f.dest_status if "/HARD/" in c + "/")
+    leftovers = [n for _d, _s, names in os.walk(hard_root) for n in names
+                 if ".dumptruck-partial" in n] if os.path.isdir(hard_root) else []
+    check("a local drive whose plain fsync fails leaves no verified copy and no partial",
+          not r.ok and all(f.dest_status[hard_root] == "failed" for f in r.files)
+          and all(f.dest_status[c] == "verified" for f in r.files for c in f.dest_status
+                  if c != hard_root)
+          and not leftovers, f"{[f.dest_status for f in r.files]} {leftovers}")
+    check("the failed fsync still shows in the durability record and report",
+          not att["full_flush_before_close"] and hard_root in r.flush_hard_roots
+          and "F_FULLFSYNC succeeded per file before close" not in doc and "DEGRADED" in doc,
+          f"{att['full_flush_before_close']} {r.flush_hard_roots}")
 
     # Sol rounds 2-5: a name can point back to this Mac, and whether it does
     # can change mid-job, so only an IP literal that bind() proves foreign

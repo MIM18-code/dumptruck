@@ -869,6 +869,15 @@ class _DestWriter(threading.Thread):
             if not self.flush_ok:
                 self.flush_failure = macio.flush_failure_text(
                     flush_err, macio.describe_volume(fd), fsync_err)
+            if fsync_err is not None:
+                # Even the plain fsync failed: the drive reported that it may
+                # not have saved this file. A read-back can still match from
+                # the page cache, so the copy must fail here, never be sealed
+                # as verified. (A share's refused F_FULLFSYNC with a working
+                # fsync is not this case and still commits.)
+                raise OSError(fsync_err, "the drive reported an error saving this file "
+                              f"(fsync: {os.strerror(fsync_err)}); the copy is not known "
+                              "to be on the drive")
             os.close(fd)
             fd = None
             os.utime(self.tmp_name, ns=(self.entry.mtime_ns, self.entry.mtime_ns),
@@ -1030,11 +1039,14 @@ def _copy_one(source_file, entry, dest_specs, hash_formats, progress,
         raise reraise
     hashes = None if source_error else {fmt: h.hexdigest() for fmt, h in hashers.items()}
     live = [w for w in writers if w.error is None]
+    # A writer whose plain fsync failed raised (its file fails), but the
+    # durability summary must still say the flush failed.
+    flushed = live + [w for w in writers if w.error is not None and w.flush_hard]
     flags = {
         "writers_nocache": all(w.nocache_ok for w in live) if live else True,
-        "writers_flush": all(w.flush_ok for w in live) if live else True,
-        "flush_failures": {w.dest_file: w.flush_failure for w in live if not w.flush_ok},
-        "flush_hard": {w.dest_file for w in live if w.flush_hard},
+        "writers_flush": all(w.flush_ok for w in flushed) if flushed else True,
+        "flush_failures": {w.dest_file: w.flush_failure for w in flushed if not w.flush_ok},
+        "flush_hard": {w.dest_file for w in flushed if w.flush_hard},
     }
     staged = {w.dest_file: (w.error, w.tmp_name, w.leaf_fd) for w in writers}
     return hashes, staged, source_error, flags

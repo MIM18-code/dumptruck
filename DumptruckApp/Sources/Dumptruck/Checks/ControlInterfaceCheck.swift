@@ -292,6 +292,126 @@ enum ControlInterfaceCheck {
                     && control.job(model, amber)["needsAttention"] as? Bool == true,
                 "an amber verified run read as plain verified")
 
+        // Eject unmounts only this volume when a sibling shares its disk.
+        require(AppModel.wholeDisk(of: "disk7s2") == "disk7" && AppModel.wholeDisk(of: "disk12") == "disk12"
+                    && AppModel.wholeDisk(of: "/dev/disk3s1s1") == "disk3",
+                "whole-disk names were not derived from partition names")
+        require(AppModel.physicalDisks(fromDiskutilInfo: [
+                    "ParentWholeDisk": "disk12",
+                    "APFSPhysicalStores": [["APFSPhysicalStore": "disk7s2"],
+                                           ["APFSPhysicalStore": "disk8s2"]]]) == ["disk7", "disk8"],
+                "an APFS volume did not resolve to all its physical stores' disks")
+        require(AppModel.physicalDisks(fromDiskutilInfo: ["ParentWholeDisk": "disk5"]) == ["disk5"],
+                "an HFS or exFAT partition did not resolve to its parent disk")
+        let diskInfo: [String: [String: Any]] = [
+            "/Volumes/A": ["ParentWholeDisk": "disk13"],
+            "/Volumes/B": ["ParentWholeDisk": "disk13"],
+            "/Volumes/APFS": ["ParentWholeDisk": "disk20",
+                              "APFSPhysicalStores": [["APFSPhysicalStore": "disk9s2"],
+                                                     ["APFSPhysicalStore": "disk13s3"]]],
+            "/Volumes/OTHER": ["ParentWholeDisk": "disk14"]]
+        let lookup: (String) -> [String: Any]? = { diskInfo[$0] ?? ($0 == "/" ? ["ParentWholeDisk": "disk3",
+            "APFSPhysicalStores": [["APFSPhysicalStore": "disk0s2"]]] : nil) }
+        require(AppModel.ejectVerb(for: "/Volumes/A", otherMountedPaths: ["/Volumes/B", "/Volumes/OTHER"],
+                                   info: lookup) == "unmount",
+                "a partition with a mounted sibling was ejected whole")
+        require(AppModel.ejectVerb(for: "/Volumes/A", otherMountedPaths: ["/Volumes/APFS"],
+                                   info: lookup) == "unmount",
+                "a sibling on a later APFS physical store was missed")
+        require(AppModel.ejectVerb(for: "/Volumes/A", otherMountedPaths: ["/Volumes/OTHER"],
+                                   info: lookup) == "eject",
+                "the last volume on its disk did not eject the disk")
+        require(AppModel.ejectVerb(for: "/Volumes/GONE", otherMountedPaths: ["/Volumes/B"],
+                                   info: lookup) == "eject",
+                "an unidentified volume did not fall back to a normal eject")
+        let bootedExternally: (String) -> [String: Any]? = { path in
+            path == "/" || path == "/Volumes/MEDIA" ? ["ParentWholeDisk": "disk5"] : nil }
+        require(AppModel.ejectVerb(for: "/Volumes/MEDIA", otherMountedPaths: [],
+                                   info: bootedExternally) == "unmount",
+                "a volume on the startup disk's device was ejected disk-wide")
+        require(!AppModel.diskMounts(excluding: "/nonexistent").contains { $0.on == "/" },
+                "the startup disk was offered as an eject sibling")
+        // A queued eject rechecks the mount and any new transfer first.
+        var queuedCard = Volume(path: card, name: "CARD", isEjectable: true, isExternal: true,
+                                isLocal: true, totalBytes: nil, freeBytes: nil)
+        queuedCard.appearedAt = Date(timeIntervalSince1970: 1_000)
+        let queuedSavedVolumes = model.volumes
+        let queuedSavedJobs = model.jobs
+        model.volumes = [queuedCard]
+        model.jobs = []
+        let identity = AppModel.mountIdentity(queuedCard)
+        require(model.queuedEjectRefusal(queuedCard, identity: identity, approvedTransfer: nil) == nil,
+                "an unchanged idle card was refused at queued eject")
+        var swapped = queuedCard
+        swapped.appearedAt = Date(timeIntervalSince1970: 2_000)
+        model.volumes = [swapped]
+        require(model.queuedEjectRefusal(queuedCard, identity: identity, approvedTransfer: nil) != nil,
+                "a card replaced while the eject waited was ejected")
+        model.volumes = [queuedCard]
+        require(model.queuedEjectRefusal(queuedCard, identity: identity + "-other", approvedTransfer: nil) != nil,
+                "a different mount at the same path and time was ejected")
+        let started = makeJob("Q001", .copying)
+        model.jobs = [started]
+        require(model.queuedEjectRefusal(queuedCard, identity: identity, approvedTransfer: nil) != nil,
+                "a transfer that started while the eject waited was ejected without force")
+        require(model.queuedEjectRefusal(queuedCard, identity: identity, approvedTransfer: started.id) == nil,
+                "a forced eject of the transfer it was approved for was refused")
+        require(model.queuedEjectRefusal(queuedCard, identity: identity, approvedTransfer: UUID()) != nil,
+                "force approved for one transfer covered a different one")
+        // A refused eject leaves its reason for that volume's eject control,
+        // only while that mount is still there.
+        var ghost = Volume(path: card + "/GHOST", name: "GHOST", isEjectable: true, isExternal: true,
+                           isLocal: true, totalBytes: nil, freeBytes: nil)
+        ghost.appearedAt = Date(timeIntervalSince1970: 5_000)
+        var replaced = ghost
+        replaced.appearedAt = Date(timeIntervalSince1970: 6_000)
+        func ejectAndWait(_ volume: Volume, from control: UUID? = nil,
+                          thenStart job: Job? = nil) async throws {
+            model.eject(volume, from: control)
+            // A transfer that starts after the request, before it runs.
+            if let job { model.jobs = [job] }
+            let deadline = Date().addingTimeInterval(15)
+            while model.ejectingVolumePaths.contains(volume.path), Date() < deadline {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        model.jobs = []
+        model.volumes = [ghost]
+        try await ejectAndWait(replaced)   // the request names a mount that is not this one
+        require(model.ejectRefusal(for: replaced) == nil && model.ejectRefusal(for: ghost) == nil,
+                "a refusal was stored for a mount that is not there")
+        require(model.lastEjectError?.contains("changed before it could be ejected") == true,
+                "the banner lost the refusal for a missing mount")
+        model.volumes = [ghost]
+        model.jobs = []
+        let railControl = UUID(), shelfControl = UUID()
+        try await ejectAndWait(ghost, from: shelfControl, thenStart: makeJob("Q002", .copying))
+        require(model.ejectRefusal(for: ghost)?.contains("transfer started") == true,
+                "a refused eject left no reason for its control: \(model.ejectRefusals)")
+        require(model.ejectRefusal(for: replaced) == nil,
+                "another mount at the same path inherited the eject reason")
+        // Only the control that asked shows the reason.
+        require(model.showsEjectRefusal(ghost, control: shelfControl)
+                    && !model.showsEjectRefusal(ghost, control: railControl),
+                "the reason showed on a control that did not ask for the eject")
+        // A cancelled force sheet hands nothing to a later eject.
+        model.armForceEject(ghost, control: railControl)
+        require(model.takeForceEjectInitiator(ghost) == railControl,
+                "the force sheet lost the control that opened it")
+        require(model.takeForceEjectInitiator(ghost) == nil,
+                "a force-sheet initiator was handed out twice")
+        // An eject with no button (the CLI) shows the reason on none.
+        model.jobs = []
+        try await ejectAndWait(ghost, thenStart: makeJob("Q003", .copying))
+        require(model.ejectRefusal(for: ghost) != nil
+                    && !model.showsEjectRefusal(ghost, control: shelfControl)
+                    && !model.showsEjectRefusal(ghost, control: railControl),
+                "a CLI eject's reason showed on a button")
+        model.dismissEjectRefusal(ghost)
+        require(model.ejectRefusal(for: ghost) == nil, "dismissing the eject reason did not clear it")
+        model.volumes = queuedSavedVolumes
+        model.jobs = queuedSavedJobs
+
         // A job whose crashed engine could not be ruled out may still write.
         let orphan = makeJob("G001", .failed)
         require(!AppModel.mayStillBeWriting(orphan), "a finished job read as writing")

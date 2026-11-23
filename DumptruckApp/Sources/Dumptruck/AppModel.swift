@@ -359,6 +359,44 @@ final class AppModel: ObservableObject {
     @Published private(set) var orphanRecoveryError: String?
     @Published private(set) var stagedRetryLabel: String?
     @Published var lastEjectError: String?
+    /// Why the last eject of a volume did not happen, by mount (path and
+    /// appearance time), shown on that volume's eject control, not only in
+    /// the window banner. A card mounted later at the same path starts clean.
+    @Published private(set) var ejectRefusals: [String: String] = [:]
+
+    nonisolated static func ejectRefusalKey(_ volume: Volume) -> String {
+        volume.path + "|" + (volume.appearedAt.map { String($0.timeIntervalSinceReferenceDate) } ?? "")
+    }
+
+    func ejectRefusal(for volume: Volume) -> String? {
+        ejectRefusals[Self.ejectRefusalKey(volume)]
+    }
+
+    func dismissEjectRefusal(_ volume: Volume) {
+        ejectRefusals[Self.ejectRefusalKey(volume)] = nil
+    }
+
+    /// Which eject control was clicked last for a mount: a volume can show
+    /// an eject button in two places, and its reason belongs on that one.
+    @Published private(set) var ejectInitiators: [String: UUID] = [:]
+
+    /// The control that opened the force-eject sheet, handed to the eject
+    /// only if the sheet is confirmed for that same mount.
+    private var pendingForceEject: (key: String, control: UUID)?
+
+    func armForceEject(_ volume: Volume, control: UUID) {
+        pendingForceEject = (Self.ejectRefusalKey(volume), control)
+    }
+
+    func takeForceEjectInitiator(_ volume: Volume) -> UUID? {
+        defer { pendingForceEject = nil }
+        guard let pending = pendingForceEject, pending.key == Self.ejectRefusalKey(volume) else { return nil }
+        return pending.control
+    }
+
+    func showsEjectRefusal(_ volume: Volume, control: UUID) -> Bool {
+        ejectRefusal(for: volume) != nil && ejectInitiators[Self.ejectRefusalKey(volume)] == control
+    }
     /// Volume roots remain here only while diskutil owns an eject attempt.
     /// Rows use the set as a cosmetic hook; failure removes the path so the
     /// existing error strip and restored row tell the whole story.
@@ -645,6 +683,14 @@ final class AppModel: ObservableObject {
                           freeBytes: cap?.free,
                           appearedAt: Volume.appearanceDate(ofPath: path))
         }.sorted { $0.name < $1.name }
+        // An eject reason belongs to one mount; drop it once that mount is gone.
+        let mounted = Set(volumes.map(Self.ejectRefusalKey))
+        if ejectRefusals.keys.contains(where: { !mounted.contains($0) }) {
+            ejectRefusals = ejectRefusals.filter { mounted.contains($0.key) }
+        }
+        if ejectInitiators.keys.contains(where: { !mounted.contains($0) }) {
+            ejectInitiators = ejectInitiators.filter { mounted.contains($0.key) }
+        }
         // A card that is gone cannot hold a current verdict (see
         // isCurrentSourceVerdict), so its destination watchers go with it,
         // exactly as clearSource and setSource release them. Left running,
@@ -5337,40 +5383,207 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func eject(_ volume: Volume) {
+    /// `control` is the eject button that asked, if any; a refusal shows on
+    /// that button. Callers without one (the CLI, card rows) pass nil.
+    func eject(_ volume: Volume, from control: UUID? = nil) {
         guard !ejectingVolumePaths.contains(volume.path) else { return }
         lastEjectError = nil
+        ejectRefusals[Self.ejectRefusalKey(volume)] = nil
+        ejectInitiators[Self.ejectRefusalKey(volume)] = control
         ejectingVolumePaths.insert(volume.path)
+        // `diskutil eject` takes every volume on the physical disk with it,
+        // so a sibling partition or APFS volume holding a queued job or a
+        // staged destination would vanish too. When another mounted volume
+        // shares the disk, unmount only this one; the disk ejects with the
+        // last of its volumes. Ejects run one at a time, so two siblings
+        // ejected together ("Eject dumped cards") never both just unmount.
+        // A transfer already holding the volume now means the caller forced
+        // this eject past it; any other transfer that starts while the
+        // request waits did not get that approval.
+        let approvedTransfer = Self.transferHoldJobID(ejectHold(volume))
+        let identity = Self.mountIdentity(volume)
+        let prior = ejectTail
+        ejectTail = Task { [weak self] in
+            await prior?.value
+            var (verb, seen) = await Task.detached {
+                let mounts = Self.diskMounts(excluding: volume.path)
+                return (Self.ejectVerb(for: volume.path, otherMountedPaths: mounts.map(\.on)),
+                        Set(mounts.map { $0.on + "|" + $0.from }))
+            }.value
+            guard let self else { return }
+            // A volume mounted while diskutil was being asked could be a
+            // sibling: decide again from the current mounts (path and
+            // device) before a disk-wide eject.
+            while verb == "eject" {
+                let mounts = Self.diskMounts(excluding: volume.path)
+                let now = Set(mounts.map { $0.on + "|" + $0.from })
+                if now == seen { break }
+                seen = now
+                verb = await Task.detached {
+                    Self.ejectVerb(for: volume.path, otherMountedPaths: mounts.map(\.on))
+                }.value
+            }
+            // Last, with no suspension between this check and diskutil.
+            if let refusal = self.queuedEjectRefusal(volume, identity: identity,
+                                                     approvedTransfer: approvedTransfer) {
+                self.lastEjectError = "Eject failed for \(volume.name): \(refusal)"
+                // Only while that path is still mounted: a gone volume has
+                // no button, and a later mount there must not inherit this.
+                if self.volumes.contains(where: { Self.ejectRefusalKey($0) == Self.ejectRefusalKey(volume) }) {
+                    self.ejectRefusals[Self.ejectRefusalKey(volume)] = refusal
+                }
+                self.ejectingVolumePaths.remove(volume.path)
+                return
+            }
+            await self.runDiskutil(verb, on: volume)
+        }
+    }
+
+    private static func transferHoldJobID(_ hold: EjectHold?) -> UUID? {
+        if case .transferRunning(let job, _) = hold { return job.id }
+        return nil
+    }
+
+    /// Which mount this is: when macOS attached its disk and the volume's
+    /// UUID. A card swapped into the same reader keeps the path but not both.
+    static func mountIdentity(_ volume: Volume) -> String {
+        let uuid = (try? URL(fileURLWithPath: volume.path)
+            .resourceValues(forKeys: [.volumeUUIDStringKey]))?.volumeUUIDString ?? "?"
+        // Read live from Disk Arbitration, not the cached volume list, so a
+        // card swapped in before the list refreshes still differs.
+        let appeared = Volume.appearanceDate(ofPath: volume.path)
+            .map { String($0.timeIntervalSinceReferenceDate) } ?? "?"
+        return appeared + "|" + uuid + "|" + (AppModel.deviceNumber(volume.path).map(String.init) ?? "?")
+    }
+
+    /// Checked right before diskutil runs, after any queued eject ahead of
+    /// this one: the same mount must still be there, and only the transfer
+    /// the caller forced past may still hold it.
+    func queuedEjectRefusal(_ volume: Volume, identity: String, approvedTransfer: UUID?) -> String? {
+        guard let current = volumes.first(where: { $0.path == volume.path }),
+              current.appearedAt == volume.appearedAt,
+              Self.mountIdentity(current) == identity else {
+            return "the volume changed before it could be ejected; nothing was ejected"
+        }
+        if let holder = Self.transferHoldJobID(ejectHold(current)), holder != approvedTransfer {
+            return "a transfer started before it could be ejected; nothing was ejected"
+        }
+        return nil
+    }
+
+    private var ejectTail: Task<Void, Never>?
+
+    /// "unmount" when another mounted volume sits on the same physical disk,
+    /// else "eject" (also when the disk cannot be identified).
+    nonisolated static func ejectVerb(
+        for path: String, otherMountedPaths: [String],
+        info: (String) -> [String: Any]? = { diskutilInfo($0) }
+    ) -> String {
+        guard let mine = info(path).map(physicalDisks(fromDiskutilInfo:)), !mine.isEmpty else {
+            return "eject"
+        }
+        // Never eject the startup disk's device (an external boot drive):
+        // its own volumes are left out of the sibling list below.
+        if !(info("/").map(physicalDisks(fromDiskutilInfo:)) ?? []).isDisjoint(with: mine) {
+            return "unmount"
+        }
+        for other in otherMountedPaths
+        where !(info(other).map(physicalDisks(fromDiskutilInfo:)) ?? []).isDisjoint(with: mine) {
+            return "unmount"
+        }
+        return "eject"
+    }
+
+    /// The physical disks under a volume, from `diskutil info -plist`: an
+    /// APFS volume's physical stores ("disk7s2" -> "disk7"), otherwise its
+    /// parent whole disk ("disk5").
+    nonisolated static func physicalDisks(fromDiskutilInfo info: [String: Any]) -> Set<String> {
+        if let stores = info["APFSPhysicalStores"] as? [[String: Any]] {
+            let disks = stores.compactMap { $0["APFSPhysicalStore"] as? String }.map(wholeDisk(of:))
+            if !disks.isEmpty { return Set(disks) }
+        }
+        return (info["ParentWholeDisk"] as? String).map { [wholeDisk(of: $0)] } ?? []
+    }
+
+    nonisolated static func wholeDisk(of bsdName: String) -> String {
+        let name = bsdName.hasPrefix("/dev/") ? String(bsdName.dropFirst(5)) : bsdName
+        guard name.hasPrefix("disk") else { return name }
+        return "disk" + name.dropFirst(4).prefix(while: \.isNumber)
+    }
+
+    /// Every mounted disk volume, hidden ones and mounts outside /Volumes
+    /// included, except `path` and the startup disk's own volumes.
+    nonisolated static func diskMounts(excluding path: String) -> [(on: String, from: String)] {
+        var buffer: UnsafeMutablePointer<statfs>?
+        let count = getmntinfo(&buffer, MNT_NOWAIT)
+        guard count > 0, let buffer else { return [] }
+        func text<T>(_ field: T) -> String {
+            withUnsafeBytes(of: field) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
+        }
+        var mounts: [(on: String, from: String)] = []
+        for index in 0..<Int(count) {
+            let from = text(buffer[index].f_mntfromname)
+            guard from.hasPrefix("/dev/disk") else { continue }
+            mounts.append((text(buffer[index].f_mntonname), from))
+        }
+        let startup = mounts.first { $0.on == "/" }.map { wholeDisk(of: $0.from) }
+        return mounts.filter { $0.on != path && wholeDisk(of: $0.from) != startup }
+    }
+
+    private nonisolated static func diskutilInfo(_ path: String) -> [String: Any]? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+        p.arguments = ["info", "-plist", path]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else { return nil }
+        return (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
+    }
+
+    /// Runs diskutil and returns once it has finished and the volume list
+    /// reflects it, so the next queued eject sees the result.
+    private func runDiskutil(_ verb: String, on volume: Volume) async {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
         let out = Pipe()
         p.standardOutput = out
         p.standardError = out
-        p.arguments = ["eject", volume.path]
-        p.terminationHandler = { [weak self] proc in
-            let text = String(data: out.fileHandleForReading.readDataToEndOfFile(),
-                              encoding: .utf8) ?? ""
-            Task { @MainActor in
-                if proc.terminationStatus != 0 {
-                    self?.lastEjectError = "Eject failed for \(volume.name): \(text.suffix(200))"
+        p.arguments = [verb, volume.path]
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            p.terminationHandler = { [weak self] proc in
+                let text = String(data: out.fileHandleForReading.readDataToEndOfFile(),
+                                  encoding: .utf8) ?? ""
+                Task { @MainActor in
+                    if proc.terminationStatus != 0 {
+                        self?.lastEjectError = "Eject failed for \(volume.name): \(text.suffix(200))"
+                        self?.ejectRefusals[Self.ejectRefusalKey(volume)] = String(text.suffix(200))
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    self?.refreshVolumes()
+                    self?.ejectingVolumePaths.remove(volume.path)
+                    done.resume()
                 }
-                self?.refreshVolumes()
-                self?.ejectingVolumePaths.remove(volume.path)
             }
-        }
-        do {
-            try p.run()
-            // Same EOF rule as every other Pipe here: without closing the
-            // parent's write end, the termination handler's read never sees
-            // EOF and silently strands one hung thread per eject (Kimi K3 PR
-            // review F1's sibling — masked by the unmount notification also
-            // refreshing the volume list).
-            try? out.fileHandleForWriting.close()
-        } catch {
-            try? out.fileHandleForWriting.close()
-            try? out.fileHandleForReading.close()
-            lastEjectError = "Eject failed: \(error.localizedDescription)"
-            ejectingVolumePaths.remove(volume.path)
+            do {
+                try p.run()
+                // Same EOF rule as every other Pipe here: without closing the
+                // parent's write end, the termination handler's read never sees
+                // EOF and silently strands one hung thread per eject (Kimi K3 PR
+                // review F1's sibling — masked by the unmount notification also
+                // refreshing the volume list).
+                try? out.fileHandleForWriting.close()
+            } catch {
+                try? out.fileHandleForWriting.close()
+                try? out.fileHandleForReading.close()
+                lastEjectError = "Eject failed: \(error.localizedDescription)"
+                ejectRefusals[Self.ejectRefusalKey(volume)] = error.localizedDescription
+                ejectingVolumePaths.remove(volume.path)
+                done.resume()
+            }
         }
     }
 }

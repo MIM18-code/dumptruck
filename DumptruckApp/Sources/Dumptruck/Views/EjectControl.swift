@@ -6,8 +6,29 @@ struct EjectControl: View {
     @EnvironmentObject var model: AppModel
     let volume: Volume
     @Binding var forceEjectTarget: Volume?
+    /// This control's identity: the model records which control was
+    /// clicked last for a mount, and only that one shows the reason.
+    @State private var controlID = UUID()
 
     var body: some View {
+        control
+            // A refused eject says why on the button that was clicked, not
+            // only in the window banner (no silent buttons, 2026-11-19).
+            .popover(isPresented: Binding(
+                get: { model.showsEjectRefusal(volume, control: controlID) },
+                set: { if !$0 { model.dismissEjectRefusal(volume) } }),
+                     arrowEdge: .bottom) {
+                Label("\(volume.name) was not ejected: \(model.ejectRefusal(for: volume) ?? "")",
+                      systemImage: "eject.circle")
+                    .font(.callout)
+                    .foregroundStyle(Semantics.dangerText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 300, alignment: .leading)
+                    .padding(12)
+            }
+    }
+
+    @ViewBuilder private var control: some View {
         if model.offersEject(volume) {
             if model.canEject(volume) || model.ejectIsHarmless(volume) {
                 Button {
@@ -15,8 +36,9 @@ struct EjectControl: View {
                     // verdict between SwiftUI rendering this branch and the
                     // operator pressing the control.
                     if model.canEject(volume) || model.ejectIsHarmless(volume) {
-                        model.eject(volume)
+                        model.eject(volume, from: controlID)
                     } else {
+                        model.armForceEject(volume, control: controlID)
                         forceEjectTarget = volume
                     }
                 } label: { Image(systemName: "eject") }
@@ -25,7 +47,7 @@ struct EjectControl: View {
                     .accessibilityLabel("Eject \(volume.name)")
             } else {
                 let reason = model.ejectHold(volume)?.summary ?? "Eject asks first"
-                Button { forceEjectTarget = volume } label: {
+                Button { model.armForceEject(volume, control: controlID); forceEjectTarget = volume } label: {
                     Image(systemName: "eject")
                         .foregroundStyle(.tertiary)
                 }
@@ -92,7 +114,7 @@ struct ForceEjectSheet: View {
             }
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { _ = model.takeForceEjectInitiator(volume); dismiss() }
                     .keyboardShortcut(.cancelAction)
                 if risky {
                     Button("Force Eject", role: .destructive) { ejectNow() }
@@ -130,7 +152,7 @@ struct ForceEjectSheet: View {
     }
 
     private func ejectNow() {
-        model.eject(volume)
+        model.eject(volume, from: model.takeForceEjectInitiator(volume))
         dismiss()
     }
 }
