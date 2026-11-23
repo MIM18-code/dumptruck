@@ -112,10 +112,37 @@ struct ForceEjectSheet: View {
         .frame(width: 460)
     }
 
+    private static func ejectIsRisky(_ hold: AppModel.EjectHold?) -> Bool {
+        EjectSheetText.isRisky(hold)
+    }
+
+    private func infoLine(_ hold: AppModel.EjectHold?, job: Job) -> String {
+        EjectSheetText.infoLine(hold, job: job)
+    }
+
+    private func title(_ hold: AppModel.EjectHold?) -> String {
+        EjectSheetText.title(hold, volumeName: volume.name)
+    }
+
+    private func message(_ hold: AppModel.EjectHold?) -> AttributedString {
+        let text = EjectSheetText.markdown(hold, volumeName: volume.name)
+        return (try? AttributedString(markdown: text)) ?? AttributedString(text)
+    }
+
+    private func ejectNow() {
+        model.eject(volume)
+        dismiss()
+    }
+}
+
+/// The warning sheet's words, outside the view so the control socket
+/// (ControlInterface.swift) answers an agent with the same text the sheet
+/// shows a person.
+enum EjectSheetText {
     /// Ejecting a card whose copy is proven, one never offloaded, or one
     /// whose SAFE verdict is stale or still being re-checked cannot damage
     /// any copy: the card is only read. Everything else can.
-    private static func ejectIsRisky(_ hold: AppModel.EjectHold?) -> Bool {
+    static func isRisky(_ hold: AppModel.EjectHold?) -> Bool {
         switch hold {
         case .verifiedNotSafe, .notOffloaded, .verdictNotCurrent,
              .destinationCheckPending, .none: return false
@@ -123,7 +150,7 @@ struct ForceEjectSheet: View {
         }
     }
 
-    private func infoLine(_ hold: AppModel.EjectHold?, job: Job) -> String {
+    static func infoLine(_ hold: AppModel.EjectHold?, job: Job) -> String {
         let state: String
         if job.isRunning {
             state = job.activityText
@@ -140,7 +167,7 @@ struct ForceEjectSheet: View {
             + (job.filesFailed > 0 ? " · \(job.filesFailed) failed file(s)" : "")
     }
 
-    private func title(_ hold: AppModel.EjectHold?) -> String {
+    static func title(_ hold: AppModel.EjectHold?, volumeName: String) -> String {
         switch hold {
         case .transferRunning(_, let asSource):
             return asSource ? "Eject a card mid-transfer?" : "Eject a destination mid-job?"
@@ -159,12 +186,14 @@ struct ForceEjectSheet: View {
         case .journalUnavailable:
             return "Eject without a durable verdict?"
         case .none:
-            return "Eject \(volume.name)?"
+            return "Eject \(volumeName)?"
         }
     }
 
-    private func message(_ hold: AppModel.EjectHold?) -> AttributedString {
-        let name = "**\(Self.escaped(volume.name))**"
+    /// The sheet's message as markdown. The control socket strips the
+    /// markup and returns the same words (`plain`).
+    static func markdown(_ hold: AppModel.EjectHold?, volumeName: String) -> String {
+        let name = "**\(Self.escaped(volumeName))**"
         let text: String
         switch hold {
         case .transferRunning(_, true):
@@ -193,7 +222,13 @@ struct ForceEjectSheet: View {
         case .none:
             text = "\(name) is not in use by any transfer."
         }
-        return (try? AttributedString(markdown: text)) ?? AttributedString(text)
+        return text
+    }
+
+    static func plain(_ hold: AppModel.EjectHold?, volumeName: String) -> String {
+        let text = markdown(hold, volumeName: volumeName)
+        guard let attributed = try? AttributedString(markdown: text) else { return text }
+        return String(attributed.characters)
     }
 
     /// Card names and labels are operator text: an underscore or asterisk in
@@ -206,10 +241,5 @@ struct ForceEjectSheet: View {
             out.append(ch)
         }
         return out
-    }
-
-    private func ejectNow() {
-        model.eject(volume)
-        dismiss()
     }
 }

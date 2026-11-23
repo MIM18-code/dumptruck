@@ -7,6 +7,9 @@ package enum DumptruckChecks {
         try CameraTermsCheck.run()
         print("CameraTermsCheck: PASS")
 
+        try await ControlInterfaceCheck.run()
+        print("ControlInterfaceCheck: PASS")
+
         try await DesktopQACheck.run()
         print("DesktopQACheck: PASS")
 
@@ -55,6 +58,6 @@ package enum DumptruckChecks {
         try await WebhookNotificationCheck.run()
         print("WebhookNotificationCheck: PASS")
 
-        print("All 18 check suites passed.")
+        print("All 19 check suites passed.")
     }
 }

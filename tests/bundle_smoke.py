@@ -75,6 +75,10 @@ try:
  reported=subprocess.check_output([str(bin/'python'),'-m','dumptruck.cli','--version'],cwd=engine,env=env,text=True).split()[1]
  plist=subprocess.check_output(['defaults','read',str(app/'Contents/Info.plist'),'CFBundleShortVersionString'],text=True).strip()
  assert plist==reported,('Info.plist version',plist,'engine version',reported)
+ # The agent CLI ships in the engine and runs on the bundled Python. With no
+ # app answering on the socket it must say so and exit 3.
+ ctl=subprocess.run([str(bin/'python'),str(engine/'dumptruck/ctl.py'),'--socket',str(work/'none.sock'),'status'],env=env,capture_output=True,text=True)
+ assert ctl.returncode==3 and 'not answering' in ctl.stderr,('dumptruck-ctl',ctl.returncode,ctl.stderr)
  # A real input is unavailable locally; exercise SDK initialization with deliberate corrupt data.
  bad=work/'invalid.r3d';bad.write_bytes(b'not a camera clip\n'*256)
  for name,expected in [('r3d-probe',6),('braw-probe',5)]:

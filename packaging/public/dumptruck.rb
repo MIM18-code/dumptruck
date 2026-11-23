@@ -14,7 +14,7 @@ class Dumptruck < Formula
   local_archive = ENV.fetch("HOMEBREW_DUMPTRUCK_LOCAL_ARCHIVE", nil)
   if local_archive
     url "file://#{URI::DEFAULT_PARSER.escape(File.expand_path(local_archive))}"
-    version "0.6.3"
+    version "0.6.4"
     sha256 ENV.fetch("HOMEBREW_DUMPTRUCK_LOCAL_ARCHIVE_SHA256")
   else
     # HTTPS, not SSH: the reference install Mac (and most alpha testers)
@@ -49,6 +49,13 @@ class Dumptruck < Formula
       exec "#{venv_bin}/python" -m dumptruck.cli "$@"
     SH
 
+    # Drives the running app over its local control socket. No cd: the
+    # paths it is given are the caller's.
+    (bin/"dumptruck-ctl").write <<~SH
+      #!/bin/bash
+      exec "#{venv_bin}/python" "#{libexec}/dumptruck/ctl.py" "$@"
+    SH
+
     cd "DumptruckApp" do
       system "swift", "build", "-c", "release", "--disable-sandbox"
       with_env(
@@ -78,7 +85,7 @@ class Dumptruck < Formula
   end
 
   test do
-    assert_match "dumptruck 0.6.3 (protocol 3)", shell_output("#{bin}/dumptruck --version")
+    assert_match "dumptruck 0.6.4 (protocol 3)", shell_output("#{bin}/dumptruck --version")
     assert_equal libexec.to_s,
                  (prefix/"Dumptruck.app/Contents/Resources/engine_root.txt").read.strip
   end

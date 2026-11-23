@@ -54,6 +54,7 @@ struct DumptruckCoreApplication: App {
                 .frame(minWidth: 940, minHeight: 600)
                 .onAppear {
                     AppDelegate.model = model
+                    ControlChannel.start(model: model)
                     model.checkForUpdatesIfDue()
                     if CameraComponentTerms.shouldAskAtLaunch(
                         CameraComponentTerms.status(engineRoot: model.engineRoot)) {

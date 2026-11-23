@@ -727,7 +727,10 @@ enum JobEvidenceParser {
         }
     }
 
-    private static func canonicalAbsolutePath(_ value: String, field: String) throws -> String {
+    private static func canonicalAbsolutePath(_ raw: String, field: String) throws -> String {
+        // Receipts carry the engine's realpath() spellings, and the app's own
+        // report folder may sit under /private: compare in the app's spelling.
+        let value = EnginePathSpelling.appSpelling(raw)
         guard value.utf8.count <= maxPathBytes, value.hasPrefix("/"),
               !value.contains("\\"),
               !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) else {
@@ -838,7 +841,7 @@ enum JobEvidenceParser {
     private static func readStableReceipt(_ url: URL) throws -> Data {
         let path = try canonicalAbsolutePath(url.path, field: "receipt path")
         guard path.hasSuffix(".receipt.json"),
-              url.resolvingSymlinksInPath().path == path else {
+              DestinationPathCheck.hasNoSymlink(path) else {
             throw ReceiptParseError.invalidReceiptPath(path)
         }
         let fd = Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
@@ -908,7 +911,7 @@ enum FinderEvidenceActions {
         guard path.hasPrefix("/"), !path.contains("\\"),
               !path.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }),
               URL(fileURLWithPath: path).standardizedFileURL.path == path,
-              URL(fileURLWithPath: path).resolvingSymlinksInPath().path == path else {
+              DestinationPathCheck.hasNoSymlink(path) else {
             return false
         }
         var info = stat()

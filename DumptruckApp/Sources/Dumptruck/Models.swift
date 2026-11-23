@@ -1,4 +1,5 @@
 import Foundation
+import DiskArbitration
 
 enum EngineContract {
     static let protocolVersion = 3
@@ -41,7 +42,25 @@ struct Volume: Identifiable, Equatable {
     // before starting a 1.4 TB offload, not discover it from a refusal.
     let totalBytes: Int64?
     let freeBytes: Int64?
+    /// When macOS attached this volume's disk: the start of "now" for a
+    /// card. nil when DiskArbitration has no answer (network shares).
+    var appearedAt: Date? = nil
     var id: String { path }
+
+    static func appearanceDate(ofPath path: String) -> Date? {
+        var fs = statfs()
+        guard statfs(path, &fs) == 0 else { return nil }
+        let from = withUnsafeBytes(of: fs.f_mntfromname) {
+            String(cString: $0.bindMemory(to: CChar.self).baseAddress!)
+        }
+        guard from.hasPrefix("/dev/"),
+              let session = DASessionCreate(kCFAllocatorDefault),
+              let disk = DADiskCreateFromBSDName(kCFAllocatorDefault, session,
+                                                 String(from.dropFirst(5))),
+              let desc = DADiskCopyDescription(disk) as? [String: Any],
+              let seconds = desc["DAAppearanceTime"] as? Double else { return nil }
+        return Date(timeIntervalSinceReferenceDate: seconds)
+    }
 
     /// Free/total for any path's volume (destinations may be plain folders,
     /// not /Volumes roots). nil when the path is unreadable.
@@ -192,6 +211,13 @@ struct LaterVerification: Codable, Hashable {
 
     var isClean: Bool {
         failed == 0 && missing == 0 && new == 0 && unverifiable == 0 && chainProblems == 0
+    }
+
+    /// The same result filed under another spelling of the same folder.
+    func relabeled(folder: String) -> LaterVerification {
+        LaterVerification(date: date, folder: folder, passed: passed, failed: failed,
+                          missing: missing, new: new, unverifiable: unverifiable,
+                          chainProblems: chainProblems)
     }
 
     /// One line for the card and the journal blocker.
@@ -872,10 +898,15 @@ final class Job: ObservableObject, Identifiable {
         }
     }
 
-    func replaceMessages(_ values: [JobMessage]) {
+    /// `errorTotal`/`warningTotal` restore a journal record's real counts
+    /// when it stored only its first messages.
+    func replaceMessages(_ values: [JobMessage], errorTotal: Int? = nil, warningTotal: Int? = nil) {
         messages = values
-        errorCount = values.reduce(0) { $0 + ($1.severity == .error ? 1 : 0) }
-        warningCount = values.count - errorCount
+        let storedErrors = values.reduce(0) { $0 + ($1.severity == .error ? 1 : 0) }
+        // Bounded so a damaged journal value cannot overflow a later +=.
+        let cap = Int(Int32.max)
+        errorCount = min(cap, max(errorTotal ?? 0, storedErrors))
+        warningCount = min(cap, max(warningTotal ?? 0, values.count - storedErrors))
         publishProgress()
     }
 

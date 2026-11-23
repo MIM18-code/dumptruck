@@ -85,6 +85,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
+        // The agent's control socket (ControlInterface.swift). The window's
+        // onAppear starts it too, whichever comes first with a model.
+        if let model = Self.model { ControlChannel.start(model: model) }
     }
 
     func userNotificationCenter(
@@ -157,5 +160,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
         // Also covers a harmless in-flight inspection when no transfer was
         // running (applicationShouldTerminate returns immediately in that case).
         Self.model?.terminateAllEngines()
+        ControlChannel.stop()
     }
 }

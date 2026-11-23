@@ -39,6 +39,55 @@ helpers, and signs and notarizes it when a Developer ID identity is installed.
 Bundled camera helpers stay off until the user agrees to their terms in the app. ARRI bundling and public distribution still require the steps
 in the [release procedure](legal/PUBLIC_RELEASE.md).
 
+## Scripting the running app
+
+`dumptruck-ctl` drives the open app the way its buttons do: stage a card and
+name it, add destinations, start, pause, resume, stop, Stage Retry and eject.
+Jobs started this way show in the window, Job History and the verdicts. A
+refused command prints the reason the window would show and exits 1. Stop
+needs `--confirm`. An eject the app would warn about needs `--confirm`, or
+`--force` while a transfer is reading or writing that volume, where ejecting
+can damage the copy in progress. A finished Fast-mode or failed run is not in
+progress, so its card ejects with `--confirm`.
+
+```sh
+dumptruck-ctl status
+dumptruck-ctl stage A001 --label A001     # a volume name or an absolute path
+dumptruck-ctl add-dest "Crucial X10 Pro"
+dumptruck-ctl mirror "Crucial X10 Pro/Show/11232026"   # drive name first, or /Volumes/…
+dumptruck-ctl start --wait 30             # retries while the card is still being read
+dumptruck-ctl wait A001                   # exits 0 only when verified
+dumptruck-ctl eject A001
+```
+
+`status`, `add-dest`, `stage` and `mirror` print where the card will land,
+for example `card lands in: /Volumes/X9/Show/11232026/Raws/A001`. The
+Organize template (Settings, `{Project}/Raws` by default) adds its folder
+under the mirrored folder, so mirroring a folder that already ends in `Raws`
+gives `…/Raws/Raws/A001`; the reply notes a folder name that repeats. A
+mirrored folder may be a full path, a path that starts with the drive's name
+(`X9/Show/11232026`), or a folder inside the one staged destination drive
+(`Show/11232026`).
+
+`start --verify fast` runs that one job in Fast mode (size check only) and
+`--verify full` in full verification, without changing the saved
+Verification setting. A Fast-mode job ends COPIED · NOT VERIFIED, never
+VERIFIED, so `wait` exits 5 when such a job finished with every file copied
+and none failed, and `wait --accept-copied` exits 0 for it. A verified job
+the window shows amber (a file left behind, the card changed mid-copy, a
+failed flush, damage found later) exits 1, Fast or full.
+
+Homebrew installs `dumptruck-ctl`. From an app bundle, run
+`/Applications/Dumptruck.app/Contents/Resources/engine/.venv/bin/python /Applications/Dumptruck.app/Contents/Resources/engine/dumptruck/ctl.py`,
+and from a checkout, `python3 dumptruck/ctl.py`. `--json` prints the app's
+reply as is; `dumptruck-ctl --help` lists every command.
+
+The app listens on a Unix socket at
+`~/Library/Application Support/Dumptruck/control.sock` (mode 0600, current user
+only, no network listener). `DUMPTRUCK_HOME` moves it to
+`$DUMPTRUCK_HOME/control.sock`, `DUMPTRUCK_CONTROL_SOCKET` names another path,
+and `DUMPTRUCK_CONTROL_SOCKET=off` turns it off.
+
 ## Included code
 
 - Python engine in `dumptruck/`, with copy verification, generation history,

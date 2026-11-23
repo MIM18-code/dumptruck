@@ -281,8 +281,11 @@ enum HistoryExport {
 
     /// Convert a single JobJournalRecord into fixed CSV fields.
     static func fields(for record: JobJournalRecord) -> [String] {
-        let errorCount = record.messages.filter { $0.severity == "error" }.count
-        let warningCount = record.messages.filter { $0.severity == "warning" }.count
+        let storedErrors = record.messages.filter { $0.severity == "error" }.count
+        let storedWarnings = record.messages.filter { $0.severity == "warning" }.count
+        // Records keep only their first messages; the totals are separate.
+        let errorCount = max(record.errorTotal ?? 0, storedErrors)
+        let warningCount = max(record.warningTotal ?? 0, storedWarnings)
         let baseVerdict = verdict(for: record)
         // Same rule as Job.verifiedNeedsAttention, for a record on disk.
         let attention = baseVerdict == .verifiedKeepCard

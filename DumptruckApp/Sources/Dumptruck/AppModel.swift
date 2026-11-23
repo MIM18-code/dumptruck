@@ -548,29 +548,40 @@ final class AppModel: ObservableObject {
     func recordLaterVerification(folder: String, summary: ExistingVerificationSummary,
                                  date: Date = Date()) {
         let target = URL(fileURLWithPath: folder).standardizedFileURL.path
-        let result = LaterVerification(
-            date: date, folder: target, passed: summary.passed,
-            failed: summary.failed.count, missing: summary.missing.count,
-            new: summary.new.count, unverifiable: summary.unverifiable.count,
-            chainProblems: summary.chainProblems.count)
+        let targetID = Self.fileID(target)
+        func result(for lane: String) -> LaterVerification {
+            LaterVerification(
+                date: date, folder: lane, passed: summary.passed,
+                failed: summary.failed.count, missing: summary.missing.count,
+                new: summary.new.count, unverifiable: summary.unverifiable.count,
+                chainProblems: summary.chainProblems.count)
+        }
         var touched = false
         for job in jobs where !job.isRunning {
-            let lanes = (job.laneRoots + job.destinations)
+            // Card folders only. Checking a destination's parent folder (a
+            // `Raws` holding many cards) used to match every job there and
+            // record a custody failure the journal refuses to store. A card
+            // folder recorded as `show/…` is the same folder as Finder's
+            // `Show/…`: match by file identity, store under the recorded path.
+            let lanes = verdictLaneRoots(job)
                 .map { URL(fileURLWithPath: $0).standardizedFileURL.path }
-            guard lanes.contains(target) else { continue }
+            guard let lane = lanes.first(where: { lane in
+                lane == target || (targetID != nil && Self.fileID(lane) == targetID)
+            }) else { continue }
+            let result = result(for: lane)
             job.laterVerification = result
             if result.isClean {
-                job.custodyFailures.removeValue(forKey: target)
+                job.custodyFailures.removeValue(forKey: lane)
                 if !job.hasCustodyFailure {
                     job.wipeBlockers.removeAll { $0.hasPrefix("a later verification found damage")
                         || $0.hasPrefix("a previous custody check found damage") }
                 }
             } else {
-                job.custodyFailures[target] = result
+                job.custodyFailures[lane] = result
                 stopJobDestinationMonitoring(job.id)
                 job.safeToWipe = false
                 let blocker = "a later verification found damage in "
-                    + "\((target as NSString).lastPathComponent): \(result.line)"
+                    + "\((lane as NSString).lastPathComponent): \(result.line)"
                 if !job.wipeBlockers.contains(blocker) { job.wipeBlockers.append(blocker) }
                 retireSafeNotifications(for: job.sourcePath)
             }
@@ -631,7 +642,8 @@ final class AppModel: ObservableObject {
                           isExternal: vals?.volumeIsInternal == false,
                           isLocal: vals?.volumeIsLocal == true,
                           totalBytes: cap?.total,
-                          freeBytes: cap?.free)
+                          freeBytes: cap?.free,
+                          appearedAt: Volume.appearanceDate(ofPath: path))
         }.sorted { $0.name < $1.name }
         // A card that is gone cannot hold a current verdict (see
         // isCurrentSourceVerdict), so its destination watchers go with it,
@@ -1494,10 +1506,8 @@ final class AppModel: ObservableObject {
                 // The mirrored-folder symlink gates, run during VALIDATION —
                 // the commit below calls nothing fallible.
                 let standard = URL(fileURLWithPath: path).standardizedFileURL.path
-                let resolved = (path as NSString).resolvingSymlinksInPath
-                let anchorResolved = (vol.path as NSString).resolvingSymlinksInPath
-                guard resolved == standard,
-                      resolved == anchorResolved || resolved.hasPrefix(anchorResolved + "/"),
+                let anchorStandard = URL(fileURLWithPath: vol.path).standardizedFileURL.path
+                guard DestinationPathCheck.unsafeComponent(from: anchorStandard, to: standard) == nil,
                       let rel = DestinationFolderProjection.relativePath(
                           selected: path, under: vol.path) else {
                     lastSetupError = "That folder uses a symlink — choose the real folder so the same path can be mirrored on every drive"
@@ -1599,17 +1609,20 @@ final class AppModel: ObservableObject {
     /// With one staged drive the picker opens inside it; with several it is
     /// unbounded, and the chosen folder's own drive anchors the mirror.
     func chooseDestinationFolder(on drive: String? = nil) {
-        var anchor = drive
-        if anchor == nil {
-            var drives: [String] = []
-            for path in destinationPaths {
-                if let volume = containingVolume(for: path), !drives.contains(volume.path) {
-                    drives.append(volume.path)
-                }
+        chooseFolder(inside: destinationFolderBoundary(on: drive), as: .destination)
+    }
+
+    /// The drive the mirrored-folder picker is held inside: the one named,
+    /// else the only staged destination drive, else none.
+    func destinationFolderBoundary(on drive: String? = nil) -> String? {
+        if let drive { return drive }
+        var drives: [String] = []
+        for path in destinationPaths {
+            if let volume = containingVolume(for: path), !drives.contains(volume.path) {
+                drives.append(volume.path)
             }
-            if drives.count == 1 { anchor = drives[0] }
         }
-        chooseFolder(inside: anchor, as: .destination)
+        return drives.count == 1 ? drives[0] : nil
     }
 
     /// First-class nested-folder picker for both rails. When opened from a
@@ -1624,18 +1637,26 @@ final class AppModel: ObservableObject {
         panel.directoryURL = boundary.map { URL(fileURLWithPath: $0) }
         panel.prompt = role == .source ? "Use as Source" : "Mirror to Destinations"
         if panel.runModal() == .OK, let path = panel.url?.path {
-            if let boundary,
-               DestinationFolderProjection.relativePath(selected: path, under: boundary) == nil {
-                lastSetupError = "Choose a folder inside \(endpointDisplayName(boundary))"
-                return
-            }
-            if role == .destination,
-               let anchor = boundary ?? containingVolume(for: path)?.path {
-                _ = setMirroredDestinationFolder(path, anchor: anchor)
-            } else {
-                _ = assign(path, as: role)
-            }
+            _ = useChosenFolder(path, inside: boundary, as: role)
         }
+    }
+
+    /// What the folder picker does with the folder it returns. The control
+    /// socket's set-mirror-folder lands here too, so a typed path passes the
+    /// same boundary, symlink and overlap gates as a picked one. On refusal
+    /// the reason is in `lastSetupError`.
+    @discardableResult
+    func useChosenFolder(_ path: String, inside boundary: String?, as role: EndpointRole) -> Bool {
+        if let boundary,
+           DestinationFolderProjection.relativePath(selected: path, under: boundary) == nil {
+            lastSetupError = "Choose a folder inside \(endpointDisplayName(boundary))"
+            return false
+        }
+        if role == .destination,
+           let anchor = boundary ?? containingVolume(for: path)?.path {
+            return setMirroredDestinationFolder(path, anchor: anchor)
+        }
+        return assign(path, as: role)
     }
 
     /// Pick clips as the source, the panel's version of dropping files on
@@ -1667,15 +1688,13 @@ final class AppModel: ObservableObject {
         // Refuse symlink redirection at selection time, before the displayed
         // relative path can claim one drive while resolving onto another.
         let selectedStandard = URL(fileURLWithPath: selected).standardizedFileURL.path
-        let selectedResolved = (selected as NSString).resolvingSymlinksInPath
-        let anchorResolved = (anchor as NSString).resolvingSymlinksInPath
-        guard selectedResolved == selectedStandard else {
-            lastSetupError = "That folder uses a symlink — choose the real folder so the same path can be mirrored on every drive"
+        let anchorStandard = URL(fileURLWithPath: anchor).standardizedFileURL.path
+        guard DestinationPathCheck.isContained(selectedStandard, in: anchorStandard) else {
+            lastSetupError = "That folder leaves its drive — choose a real folder on the destination drive"
             return false
         }
-        guard selectedResolved == anchorResolved
-                || selectedResolved.hasPrefix(anchorResolved + "/") else {
-            lastSetupError = "That folder leaves its drive — choose a real folder on the destination drive"
+        guard DestinationPathCheck.unsafeComponent(from: anchorStandard, to: selectedStandard) == nil else {
+            lastSetupError = "That folder uses a symlink — choose the real folder so the same path can be mirrored on every drive"
             return false
         }
         if let reason = assignmentBlockedReason(selected, as: .destination) {
@@ -1724,9 +1743,8 @@ final class AppModel: ObservableObject {
             lastSetupError = "Choose a folder inside \(endpointDisplayName(anchor))"
             return false
         }
-        let resolved = (path as NSString).resolvingSymlinksInPath
-        let anchorResolved = (anchor as NSString).resolvingSymlinksInPath
-        guard resolved == path, resolved.hasPrefix(anchorResolved + "/") else {
+        guard DestinationPathCheck.unsafeComponent(
+            from: URL(fileURLWithPath: anchor).standardizedFileURL.path, to: path) == nil else {
             lastSetupError = "That folder uses a symlink — choose the real folder on the drive"
             return false
         }
@@ -1909,7 +1927,6 @@ final class AppModel: ObservableObject {
             }
         }
         for (index, root) in plan.rawRoots.enumerated() {
-            let resolvedRoot = (root as NSString).resolvingSymlinksInPath
             guard !pathsOverlap(plan.src, root) else {
                 lastSetupError = "The saved source and destination overlap — retry refused"
                 return false
@@ -1919,14 +1936,15 @@ final class AppModel: ObservableObject {
                 lastSetupError = "The saved rendered destination is incomplete — retry refused"
                 return false
             }
-            if fm.fileExists(atPath: dest) {
-                let resolved = (dest as NSString).resolvingSymlinksInPath
-                guard resolved == dest,
-                      resolved == resolvedRoot || resolved.hasPrefix(resolvedRoot + "/") else {
-                    lastSetupError = "The saved destination leaves its drive or uses a symlink — retry refused"
-                    return false
-                }
-            } else {
+            // Every existing folder on the way, even when the last one is
+            // still missing: a symlinked parent must be refused here, not
+            // only at launch.
+            guard DestinationPathCheck.firstUnsafeComponent(dest) == nil,
+                  DestinationPathCheck.unsafeComponent(from: root, to: dest) == nil else {
+                lastSetupError = "The saved destination leaves its drive or uses a symlink — retry refused"
+                return false
+            }
+            if !fm.fileExists(atPath: dest) {
                 // The rendered peer folder may legitimately be absent. Its
                 // parent/root identity is what is pinned and it is created
                 // only after the operator presses Start.
@@ -2633,7 +2651,7 @@ final class AppModel: ObservableObject {
             journalError = nil
             return true
         case .failure:
-            journalError = journal.failure ?? "job journal unavailable"
+            journalError = journal.failure ?? journal.rejection ?? "job journal unavailable"
             objectWillChange.send()
             return false
         }
@@ -2753,7 +2771,7 @@ final class AppModel: ObservableObject {
         job.replaceMessages(record.messages.map { message in
             JobMessage(severity: message.severity == "error" ? .error : .warning,
                        text: message.text)
-        })
+        }, errorTotal: record.errorTotal, warningTotal: record.warningTotal)
         if interrupted {
             let recoveryBlocker = "transfer interrupted before terminal verification"
             job.stopRequested = false
@@ -2859,6 +2877,32 @@ final class AppModel: ObservableObject {
     /// their disabled state past our invalidations (smoke-test finding: a
     /// stale-disabled Start ate clicks after Settings changes and completed
     /// jobs), so the button stays clickable and EXPLAINS itself when blocked.
+    /// One Start with its own verification mode, "fast" or "full", for the
+    /// control socket's `start --verify`. The saved preference is left as
+    /// it is; only the plans built during this press read the override.
+    func startOrExplain(verifyMode: String?) {
+        withVerifyOverride(verifyMode) { startOrExplain() }
+    }
+
+    /// Plans built inside `body` use `mode` ("fast", "full", or nil for the
+    /// saved setting). Nothing outside `body` sees it.
+    func withVerifyOverride<T>(_ mode: String?, _ body: () -> T) -> T {
+        let previous = startVerifyOverride
+        startVerifyOverride = mode
+        defer { startVerifyOverride = previous }
+        return body()
+    }
+
+    /// Set only for the length of one `startOrExplain(verifyMode:)` call.
+    private(set) var startVerifyOverride: String?
+
+    /// Whether a plan built now runs size-only: the override when a press
+    /// carries one, else the saved Verification setting.
+    var plansFastVerify: Bool {
+        if let override = startVerifyOverride { return override == "fast" }
+        return UserDefaults.standard.string(forKey: Pref.verifyMode) == "fast"
+    }
+
     func startOrExplain() {
         if startRunsBatch {
             // Everything staged starts on one click: the card on the bench
@@ -2979,8 +3023,9 @@ final class AppModel: ObservableObject {
                 if named.label != label { label = named.label }
             }
         }
-        // One-shot consumed: the plan (fresh or retry) is frozen now.
-        continuationFreeze = nil
+        // One-shot consumed: the plan (fresh or retry) is frozen now. The
+        // bench stops offering the retry, or a second Start would run it again.
+        clearStagedRetry()
         sourceChangedSinceVerification = false
         // Queue check happens BEFORE the job is inserted: the predicate must
         // never count the job being started (round-4: every first job queued
@@ -3027,7 +3072,11 @@ final class AppModel: ObservableObject {
             _ = stopJobSourceMonitoring(job.id)
             jobs.removeAll { $0.id == job.id }
             queuedParams.removeValue(forKey: job.id)
-            lastSetupError = journalError ?? "job journal unavailable"
+            let reason = journalError ?? "job journal unavailable"
+            // As in queueBatch: a refused snapshot leaves the journal
+            // writable, so saving the jobs without this one clears the block.
+            if journal.failure == nil { _ = persistJournal() }
+            lastSetupError = reason
             updateSleepAssertion()
             updateDockTile()
             return
@@ -3117,7 +3166,9 @@ final class AppModel: ObservableObject {
         }
         // Re-contain the rendered destinations: a symlink planted at the
         // template path while the job waited must never redirect the engine.
-        for dest in plan.dests where (dest as NSString).resolvingSymlinksInPath != dest {
+        for (root, dest) in zip(plan.rawRoots, plan.dests)
+        where DestinationPathCheck.firstUnsafeComponent(dest) != nil
+            || DestinationPathCheck.unsafeComponent(from: root, to: dest) != nil {
             job.phase = .failed
             job.error("the destination folder \(dest) changed to a symlink while this "
                       + "job was queued. Refused.")
@@ -3161,7 +3212,11 @@ final class AppModel: ObservableObject {
         job.finishedDate = Date()
         // Copying today's source does not prove that every entry from an old
         // damaged custody check was covered. Only a clean custody reread
-        // retires that warning, including on a trusted continuation.
+        // retires that warning, including on a trusted continuation. Carry
+        // earlier damage again now that the engine has created the lanes:
+        // at job_started a lane may not exist yet, so a name the filesystem
+        // treats as the same folder could only be matched by spelling.
+        Self.carryCustodyFailures(into: job, from: jobs.filter { $0.id != job.id })
         if job.hasCustodyFailure {
             job.safeToWipe = false
             let reason = "a previous custody check found damage; run Verify Existing Custody before wiping"
@@ -3534,23 +3589,25 @@ final class AppModel: ObservableObject {
                     organizationFolder, for: root,
                     exactRoots: context == nil
                         ? organizationExemptRoots(planExactRoots) : planExactRoots))
-            let resolvedRoot = (root as NSString).resolvingSymlinksInPath
             let mirroredBase = DestinationFolderProjection.project(
                 root: root,
                 mirroredFolder: mirrored,
                 organizationFolder: "")
             if !mirrored.isEmpty,
-               FileManager.default.fileExists(atPath: mirroredBase),
-               (mirroredBase as NSString).resolvingSymlinksInPath != mirroredBase {
+               DestinationPathCheck.unsafeComponent(from: root, to: mirroredBase) != nil {
                 return .failure(PlanError(message:
                     "Mirrored destination folder changed to a symlink: \(mirroredBase). "
                     + "Choose the real folder again."))
             }
-            let resolved = (rendered as NSString).resolvingSymlinksInPath
-            guard resolved == resolvedRoot || resolved.hasPrefix(resolvedRoot + "/") else {
+            // The path as rendered, not Foundation's resolved spelling: that
+            // rewrote existing folders to their on-disk capitals and left a
+            // symlinked parent unresolved when the last folder was new.
+            let resolved = URL(fileURLWithPath: rendered).standardizedFileURL.path
+            if let unsafe = DestinationPathCheck.firstUnsafeComponent(resolved)
+                ?? DestinationPathCheck.unsafeComponent(from: root, to: resolved) {
                 return .failure(PlanError(message:
                     "Destination folder escapes its drive through a symlink: "
-                    + "\(rendered) resolves to \(resolved). Refused."))
+                    + "\(unsafe) is a symlink or cannot be read. Refused."))
             }
             var isDir: ObjCBool = false
             guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir),
@@ -3575,7 +3632,7 @@ final class AppModel: ObservableObject {
         args += ["--label", cardLabel, "--json"]
         if LooseSourceStaging.isStagedSet(src) { args.append("--loose-files") }
         args += LooseSourceStaging.engineFlags(for: src)
-        if fast || d.string(forKey: Pref.verifyMode) == "fast" { args.append("--fast") }
+        if fast || plansFastVerify { args.append("--fast") }
         if !d.bool(forKey: Pref.sourceReread) {
             args.append("--no-source-verify")
         }
@@ -3679,10 +3736,15 @@ final class AppModel: ObservableObject {
                 else { batchSourceSessions.removeValue(forKey: path) }
             }
             jobs = priorJobs
-            lastSetupError = journalError ?? "job journal unavailable"
+            let reason = journalError ?? "job journal unavailable"
+            // A refused snapshot leaves the journal writable: saving the
+            // prior jobs again clears the block, so one bad batch card does
+            // not stop every later Start. A failed write stays failed.
+            if journal.failure == nil { _ = persistJournal() }
+            lastSetupError = reason
             updateSleepAssertion()
             updateDockTile()
-            return .failure(.journalPersistenceFailed(journalError ?? "job journal unavailable"))
+            return .failure(.journalPersistenceFailed(reason))
         }
 
         // A staged card that was promoted into this batch (drop onto an
@@ -4018,8 +4080,19 @@ final class AppModel: ObservableObject {
         // materialized only when a run actually begins. Failure cleans up any
         // directories this call itself created (empty ones only).
         var createdRoots: [(path: String, fileID: String)] = []
-        for (i, dest) in plan.dests.enumerated() where dest != plan.rawRoots[i] {
-            if !FileManager.default.fileExists(atPath: dest) {
+        for (i, dest) in plan.dests.enumerated() {
+            // Planning checked this path; a symlink planted since then must
+            // not carry the folders (and the card) onto another drive. Every
+            // destination, roots and extra folders included.
+            if let unsafe = DestinationPathCheck.firstUnsafeComponent(dest)
+                ?? DestinationPathCheck.unsafeComponent(from: plan.rawRoots[i], to: dest) {
+                for c in createdRoots { self.cleanupCreatedRoot(c, for: job.id) }
+                job.phase = .failed
+                job.error("the destination folder \(unsafe) is a symlink or cannot be read. Refused.")
+                finalizeTerminal(job)
+                return
+            }
+            if dest != plan.rawRoots[i], !FileManager.default.fileExists(atPath: dest) {
                 // remember the topmost missing component for cleanup
                 var top = dest
                 while true {
@@ -4082,7 +4155,8 @@ final class AppModel: ObservableObject {
         }
         @Sendable nonisolated func dispatchLine(_ line: Data) {
             guard !line.isEmpty else { return }
-            let parsed = try? JSONSerialization.jsonObject(with: line) as? [String: Any]
+            let parsed = (try? JSONSerialization.jsonObject(with: line) as? [String: Any])
+                .map(EnginePathSpelling.respell(event:))
             // Lines queue here and one main-actor pass applies everything
             // that has arrived. A task per line, each awaiting the last, ran
             // one event per SwiftUI layout pass once the UI fell behind: two
@@ -4103,6 +4177,7 @@ final class AppModel: ObservableObject {
                 guard let self,
                       let job = self.jobs.first(where: { $0.id == jobID }) else { return }
                 var modelChanged = false
+                var journalDirty = false
                 @MainActor func apply(_ parsed: [String: Any]?) {
                     // Strict stream framing (round-11 finding 5): a malformed
                     // nonempty line, a second hello, or ANY event after the
@@ -4172,13 +4247,11 @@ final class AppModel: ObservableObject {
                         return
                     }
                     if event == "job_started" {
-                        for previous in self.jobs where previous.id != job.id {
-                            for (lane, failure) in previous.custodyFailures where job.laneRoots.contains(lane) {
-                                if job.custodyFailures[lane].map({ $0.date < failure.date }) ?? true {
-                                    job.custodyFailures[lane] = failure
-                                }
-                            }
-                        }
+                        // Earlier damage follows the card folder, however its
+                        // capitals were spelled: match by folder identity and
+                        // re-key it under this job's own lane.
+                        Self.carryCustodyFailures(into: job,
+                                                  from: self.jobs.filter { $0.id != job.id })
                     }
                     // Job is its OWN ObservableObject: views observing the MODEL
                     // (toolbar Start gate, eject locks) never see job mutations
@@ -4187,11 +4260,14 @@ final class AppModel: ObservableObject {
                     // are skipped — nothing model-level depends on them.
                     let e = event
                     if !Self.isFileActivityEvent(e) { modelChanged = true }
-                    if Self.journalRelevantEvent(e) {
-                        _ = self.persistJournal()
-                    }
+                    if Self.journalRelevantEvent(e) { journalDirty = true }
                 }
+                // One journal save per drained batch: a card with hundreds
+                // of source warnings used to rewrite and fsync the whole
+                // journal on the main actor once per warning. Terminal
+                // verdicts still save in finalizeTerminal before publishing.
                 for parsed in batch { apply(parsed) }
+                if journalDirty { _ = self.persistJournal() }
                 if modelChanged { self.objectWillChange.send() }
             }
             stream.eventTail = next
@@ -5007,7 +5083,8 @@ final class AppModel: ObservableObject {
     /// Joshua, 2026-10-05: "an eject all for stuff that's dumped".
     var dumpedCardVolumes: [Volume] {
         volumes.filter { volume in
-            jobs.contains { !$0.isRunning && pathsOverlap($0.sourcePath, volume.path) }
+            jobs.contains { !$0.isRunning && pathsOverlap($0.sourcePath, volume.path)
+                && runReadThisMount($0, volume) }
                 && offersEject(volume) && canEject(volume)
         }
     }
@@ -5021,6 +5098,41 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Earlier custody damage on a card folder this job writes again stays
+    /// on the new job, matched by folder identity so `show` and `Show` are
+    /// one folder, and filed under the new job's own lane spelling.
+    /// How a case-insensitive APFS volume compares names: Unicode case
+    /// folding (so "ſ" matches "s") on canonically composed text.
+    private static func foldedName(_ path: String) -> String {
+        path.precomposedStringWithCanonicalMapping.folding(options: [.caseInsensitive], locale: nil)
+    }
+
+    static func carryCustodyFailures(into job: Job, from previousJobs: [Job]) {
+        let laneIDs = job.laneRoots.map { ($0, fileID($0)) }
+        for previous in previousJobs {
+            for (lane, failure) in previous.custodyFailures {
+                let laneID = fileID(lane)
+                // By identity while both folders exist; by name, ignoring
+                // capitals on a case-insensitive volume, when the old folder
+                // is gone and the engine has not recreated this one yet.
+                guard let ownLane = laneIDs.first(where: { own, ownID in
+                    own == lane || (laneID != nil && ownID == laneID)
+                        || (LaunchPlanValidation.caseSensitivityOfNearestFolder(own) != true
+                            && foldedName(own) == foldedName(lane))
+                })?.0 else { continue }
+                if job.custodyFailures[ownLane].map({ $0.date < failure.date }) ?? true {
+                    job.custodyFailures[ownLane] = failure.relabeled(folder: ownLane)
+                }
+            }
+        }
+    }
+
+    /// A running job, or one restored after a crash whose engine could not
+    /// be ruled out: that process may still be writing, so eject needs force.
+    static func mayStillBeWriting(_ job: Job) -> Bool {
+        job.isRunning || job.unresolvedRecoveryPhase != nil
+    }
+
     func canEject(_ volume: Volume) -> Bool {
         // A confirmed force eject remains available, but no one-click or
         // automatic eject may rely on an undurable terminal verdict.
@@ -5032,17 +5144,22 @@ final class AppModel: ObservableObject {
         }
         let stagedAsSource = sourcePath.map { sourceReads($0, volume.path) } == true
         let involved = runsNewestFirst { job in
-            sourceReads(job.sourcePath, volume.path)
+            // An engine that may still be running holds its source even if
+            // the card was plugged in again after the job began.
+            (sourceReads(job.sourcePath, volume.path)
+                && (runReadThisMount(job, volume) || Self.mayStillBeWriting(job)))
                 || job.destinations.contains(where: { pathsOverlap($0, volume.path) })
         }
         // A source staged but never verified (or re-staged/re-written since
         // verification) requires the explicit force-eject wall. Historical
         // jobs at the same mount path do not make this assignment safe.
         if involved.isEmpty { return !stagedAsSource }
-        if involved.contains(where: { $0.isRunning }) { return false }
+        if involved.contains(where: Self.mayStillBeWriting) { return false }
         // jobs is newest-first. A later verified retry supersedes an older
         // failure for the same source; the reverse ordering must stay locked.
-        let sourceJobs = involved.filter { sourceReads($0.sourcePath, volume.path) }
+        let sourceJobs = involved.filter {
+            sourceReads($0.sourcePath, volume.path) && runReadThisMount($0, volume)
+        }
         // A historical source record is evidence for the searchable history,
         // not a current mount assignment. One-click source eject needs live
         // identity proof: either the staged session or a batch session with
@@ -5055,6 +5172,21 @@ final class AppModel: ObservableObject {
             guard !stagedAsSource else { return false }
         }
         return Job.latestSourceRunsAllowEject(sourceJobs)
+    }
+
+    /// Only runs since this card was plugged in speak for it. A run created
+    /// before its disk appeared read some earlier card mounted at the same
+    /// path, or this card in an earlier session: either way it is the past.
+    /// A turbo copy of an old "MixPre" card kept a freshly formatted MixPre
+    /// card behind "Eject an UNVERIFIED card?" eleven days later (Joshua,
+    /// 2026-11-20: "it shouldn't have anything to do with stuff in the
+    /// past"). Unknown appearance time counts every run, as before, and so
+    /// does a live transfer: a paused job can resume after a replug, and
+    /// one that finished after the card appeared ran on this mount too.
+    func runReadThisMount(_ job: Job, _ volume: Volume) -> Bool {
+        guard !job.isRunning, let appeared = volume.appearedAt else { return true }
+        if let finished = job.finishedDate, finished > appeared { return true }
+        return job.createdDate >= appeared
     }
 
     /// True when a job or staged source with this path reads from the
@@ -5132,17 +5264,22 @@ final class AppModel: ObservableObject {
     func ejectHold(_ volume: Volume) -> EjectHold? {
         guard !canEject(volume) else { return nil }
         let involved = runsNewestFirst { job in
-            sourceReads(job.sourcePath, volume.path)
+            // An engine that may still be running holds its source even if
+            // the card was plugged in again after the job began.
+            (sourceReads(job.sourcePath, volume.path)
+                && (runReadThisMount(job, volume) || Self.mayStillBeWriting(job)))
                 || job.destinations.contains(where: { pathsOverlap($0, volume.path) })
         }
-        if let running = involved.first(where: { $0.isRunning }) {
+        if let running = involved.first(where: Self.mayStillBeWriting) {
             return .transferRunning(running, asSource: sourceReads(running.sourcePath, volume.path))
         }
         if journalError != nil { return .journalUnavailable }
         // Same newest-per-source rule as latestSourceRunsAllowEject: an older
         // failure superseded by a later verified retry is history.
         var latestBySource: [String: Job] = [:]
-        let sourceJobs = involved.filter { sourceReads($0.sourcePath, volume.path) }
+        let sourceJobs = involved.filter {
+            sourceReads($0.sourcePath, volume.path) && runReadThisMount($0, volume)
+        }
         for job in sourceJobs where latestBySource[job.sourcePath] == nil {
             latestBySource[job.sourcePath] = job
         }

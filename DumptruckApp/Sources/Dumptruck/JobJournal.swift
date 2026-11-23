@@ -96,6 +96,45 @@ struct JobJournalRecord: Codable, Identifiable, Hashable {
     let laterVerification: LaterVerification?
     let custodyFailures: [String: LaterVerification]?
     let createdDate: Date
+    /// The job's real message totals; `messages` keeps only the first
+    /// ones. Optional and additive: journals written before it decode
+    /// unchanged and count their stored messages instead.
+    let errorTotal: Int?
+    let warningTotal: Int?
+
+    /// Messages one record keeps in the journal. The whole journal is
+    /// rewritten on the main actor at every save, and a failed card with
+    /// tens of thousands of per-file errors once made it 22 MB. The job's
+    /// report keeps the full list.
+    /// 100 messages of 1,000 characters keep the most a record can hold
+    /// near 100 KB, so 200 history records plus 256 live ones stay under
+    /// the 64 MB bound load() enforces.
+    static let maximumStoredMessages = 100
+    static let maximumStoredMessageLength = 1_000
+
+    /// The first messages in order, then one line counting what was left
+    /// out. That line is an error when any dropped message was, so a
+    /// restored job still shows it had errors.
+    static func boundedMessages(_ messages: [JobMessage], errorTotal: Int? = nil,
+                                warningTotal: Int? = nil) -> [JournalMessage] {
+        func stored(_ message: JobMessage) -> JournalMessage {
+            JournalMessage(severity: message.severity == .error ? "error" : "warning",
+                           text: String(message.text.prefix(maximumStoredMessageLength)))
+        }
+        guard messages.count > maximumStoredMessages else { return messages.map(stored) }
+        let kept = messages.prefix(maximumStoredMessages - 1)
+        // From the job's totals when known: a restored job's list already
+        // ends in an earlier summary line that stands for many messages.
+        let keptErrors = kept.filter { $0.severity == .error }.count
+        let droppedErrors = max(0, (errorTotal ?? messages.filter { $0.severity == .error }.count) - keptErrors)
+        let droppedWarnings = max(0, (warningTotal ?? messages.filter { $0.severity == .warning }.count)
+                                  - (kept.count - keptErrors))
+        let summary = "\(droppedErrors + droppedWarnings) more messages (\(droppedErrors) errors, "
+            + "\(droppedWarnings) warnings) are not kept in Job History; "
+            + "the job's report lists them all"
+        return kept.map(stored) + [JournalMessage(severity: droppedErrors > 0 ? "error" : "warning",
+                                                  text: summary)]
+    }
 
     init(job: Job, plan: JournalLaunchPlan?, createdDate: Date? = nil) {
         id = job.id
@@ -119,10 +158,10 @@ struct JobJournalRecord: Codable, Identifiable, Hashable {
         physicalDevices = job.physicalDevices
         mediaFlushConfirmed = job.mediaFlushConfirmed
         wipeBlockers = job.wipeBlockers
-        messages = job.messages.map {
-            JournalMessage(severity: $0.severity == .error ? "error" : "warning",
-                           text: $0.text)
-        }
+        messages = Self.boundedMessages(job.messages, errorTotal: job.errorCount,
+                                        warningTotal: job.warningCount)
+        errorTotal = job.errorCount
+        warningTotal = job.warningCount
         reportPath = job.reportPath
         reportFailed = job.reportFailed
         reportPaths = job.reportPaths.isEmpty ? nil : job.reportPaths
@@ -460,31 +499,43 @@ final class JobJournal {
         guard isHealthy else {
             return .failure(JournalError.unavailable(failure ?? "job journal unavailable"))
         }
+        // A snapshot this journal refuses to write is the caller's mistake,
+        // not a broken disk: report it and keep the journal usable, so the
+        // next valid snapshot clears it. Only a failed write below disables
+        // the journal for the rest of the process.
+        let ids = records.map(\.id)
+        let runIDs = records.map(\.runID)
+        guard Set(ids).count == ids.count,
+              Set(runIDs).count == runIDs.count,
+              records.allSatisfy(Self.recordShapeIsValid) else {
+            return reject("job journal snapshot contains duplicate or unsafe records")
+        }
+        let liveCount = records.filter(Self.isLive).count
+        guard liveCount <= JobJournalSchema.maximumLiveRecords else {
+            return reject("too many live jobs to persist safely; stop or remove queued jobs")
+        }
+        let limited = bounded(records)
+        let document = JobJournalDocument(schema: JobJournalSchema.current,
+                                          generation: generation &+ 1,
+                                          updatedAt: Date(), records: limited)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        let data: Data
+        do {
+            data = try encoder.encode(document)
+        } catch {
+            return reject("job journal snapshot could not be encoded: \(error.localizedDescription)")
+        }
+        // load() refuses a file over this bound, so never write one.
+        guard data.count <= JobJournalSchema.maximumDiskBytes else {
+            return reject("job journal snapshot exceeds its on-disk safety bound")
+        }
         do {
             try ensureParentDirectory()
-            let ids = records.map(\.id)
-            let runIDs = records.map(\.runID)
-            guard Set(ids).count == ids.count,
-                  Set(runIDs).count == runIDs.count,
-                  records.allSatisfy(Self.recordShapeIsValid) else {
-                throw JournalError.unavailable(
-                    "job journal snapshot contains duplicate or unsafe records")
-            }
-            let liveCount = records.filter(Self.isLive).count
-            guard liveCount <= JobJournalSchema.maximumLiveRecords else {
-                throw JournalError.unavailable(
-                    "too many live jobs to persist safely; stop or remove queued jobs")
-            }
             generation &+= 1
-            let limited = bounded(records)
-            let document = JobJournalDocument(schema: JobJournalSchema.current,
-                                              generation: generation,
-                                              updatedAt: Date(), records: limited)
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.sortedKeys]
-            let data = try encoder.encode(document)
             try atomicWrite(data)
+            rejection = nil
             return .success(())
         } catch {
             writable = false
@@ -492,6 +543,14 @@ final class JobJournal {
                 + "new transfers are blocked and the existing journal was preserved"
             return .failure(error)
         }
+    }
+
+    /// Why the last snapshot was refused before any write, or nil.
+    private(set) var rejection: String?
+
+    private func reject(_ message: String) -> Result<Void, Error> {
+        rejection = message + "; new transfers are blocked until a valid snapshot saves"
+        return .failure(JournalError.unavailable(message))
     }
 
     private func bounded(_ records: [JobJournalRecord]) -> [JobJournalRecord] {

@@ -176,6 +176,23 @@ enum LaunchPlanValidation {
     /// True only when `path` sits on a volume that reports case-sensitive
     /// names. Unknown or unreadable volumes count as case-insensitive
     /// (fail closed), matching the engine's probe.
+    /// Case sensitivity of the volume holding `path`, read from the nearest
+    /// folder that exists (a card lane may not be created yet); nil when no
+    /// folder on the way can be read.
+    static func caseSensitivityOfNearestFolder(_ path: String) -> Bool? {
+        var current = path
+        while true {
+            if let values = try? URL(fileURLWithPath: current)
+                .resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey]),
+               let sensitive = values.volumeSupportsCaseSensitiveNames {
+                return sensitive
+            }
+            let parent = (current as NSString).deletingLastPathComponent
+            if parent == current || parent.isEmpty { return nil }
+            current = parent
+        }
+    }
+
     static func isCaseSensitive(_ path: String) -> Bool {
         let values = try? URL(fileURLWithPath: path)
             .resourceValues(forKeys: [.volumeSupportsCaseSensitiveNamesKey])
@@ -188,5 +205,101 @@ enum LaunchPlanValidation {
 
     private static func containsControl(_ value: String) -> Bool {
         value.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7f }
+    }
+}
+
+/// The app spells paths the way Foundation does, and Foundation drops a
+/// leading /private from /private/tmp, /private/var and /private/etc. The
+/// engine reports os.path.realpath() spellings, which keep it. A job whose
+/// destination was under /tmp or /var therefore got engine roots that did
+/// not match its own destinations; the journal refused the record, the job
+/// showed FAILED and every later Start was blocked until relaunch.
+/// Engine events are respelled once, where they are decoded.
+enum EnginePathSpelling {
+    private static let privatePrefixes = ["/private/tmp", "/private/var", "/private/etc"]
+
+    /// The inverse: the real path behind the system's /tmp, /var and /etc.
+    static func privateSpelling(_ path: String) -> String {
+        for alias in ["/tmp", "/var", "/etc"] where path == alias || path.hasPrefix(alias + "/") {
+            return "/private" + path
+        }
+        return path
+    }
+
+    static func appSpelling(_ path: String) -> String {
+        for prefix in privatePrefixes where path == prefix || path.hasPrefix(prefix + "/") {
+            return String(path.dropFirst("/private".count))
+        }
+        return path
+    }
+
+    /// Respell every string value and dictionary key in a decoded event.
+    /// Only absolute paths start with one of the prefixes, so relative file
+    /// paths, hashes and free text pass through unchanged.
+    static func respell(_ value: Any) -> Any {
+        switch value {
+        case let text as String:
+            return appSpelling(text)
+        case let dictionary as [String: Any]:
+            var out: [String: Any] = [:]
+            for (key, item) in dictionary { out[appSpelling(key)] = respell(item) }
+            return out
+        case let array as [Any]:
+            return array.map(respell)
+        default:
+            return value
+        }
+    }
+
+    static func respell(event: [String: Any]) -> [String: Any] {
+        respell(event) as? [String: Any] ?? event
+    }
+}
+
+/// Symlink checks by lstat, one existing folder at a time. Comparing a path
+/// with Foundation's resolvingSymlinksInPath went wrong two ways: it leaves
+/// a path unchanged when its last folder does not exist yet, so a symlinked
+/// parent slipped through, and on case-insensitive volumes it rewrites an
+/// existing folder to its on-disk capitals, so `show` read as a symlink to
+/// `Show`.
+enum DestinationPathCheck {
+    /// True when no existing folder or file along an absolute path is a
+    /// symlink, reading /tmp, /var and /etc through /private. Unlike
+    /// comparing with resolvingSymlinksInPath, a folder spelled in other
+    /// capitals than the disk's still passes.
+    static func hasNoSymlink(_ path: String) -> Bool {
+        firstUnsafeComponent(path) == nil
+    }
+
+    /// The first symlink (or unreadable folder) anywhere along an absolute
+    /// path, the destination root included, in the app's spelling; nil when
+    /// there is none. The engine follows a symlinked root to its target.
+    static func firstUnsafeComponent(_ path: String) -> String? {
+        unsafeComponent(from: "/", to: EnginePathSpelling.privateSpelling(path))
+            .map(EnginePathSpelling.appSpelling)
+    }
+
+    static func isContained(_ path: String, in root: String) -> Bool {
+        path == root || path.hasPrefix(root.hasSuffix("/") ? root : root + "/")
+    }
+
+    /// The first folder below `root` on the way to `path` that is a symlink
+    /// or cannot be examined, or nil when every existing folder is a real
+    /// directory. Folders that do not exist yet end the walk: nothing below
+    /// them exists either. `root` itself is not examined.
+    static func unsafeComponent(from root: String, to path: String) -> String? {
+        guard isContained(path, in: root) else { return path }
+        guard path != root else { return nil }
+        let base = root.hasSuffix("/") ? String(root.dropLast()) : root
+        var current = base
+        for component in path.dropFirst(base.count + 1).split(separator: "/") {
+            current += "/" + component
+            var info = stat()
+            if lstat(current, &info) != 0 {
+                return errno == ENOENT ? nil : current
+            }
+            if (info.st_mode & S_IFMT) == S_IFLNK { return current }
+        }
+        return nil
     }
 }

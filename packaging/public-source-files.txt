@@ -18,6 +18,7 @@ DumptruckApp/Sources/Dumptruck/CardFolderClaims.swift
 DumptruckApp/Sources/Dumptruck/CardLabelRules.swift
 DumptruckApp/Sources/Dumptruck/Checks/BatchSourceStagingCheck.swift
 DumptruckApp/Sources/Dumptruck/Checks/CameraTermsCheck.swift
+DumptruckApp/Sources/Dumptruck/Checks/ControlInterfaceCheck.swift
 DumptruckApp/Sources/Dumptruck/Checks/CheckSupport.swift
 DumptruckApp/Sources/Dumptruck/Checks/DesktopQACheck.swift
 DumptruckApp/Sources/Dumptruck/Checks/DumptruckChecks.swift
@@ -37,6 +38,8 @@ DumptruckApp/Sources/Dumptruck/Checks/TerminalJournalCheck.swift
 DumptruckApp/Sources/Dumptruck/Checks/ThroughputCheck.swift
 DumptruckApp/Sources/Dumptruck/Checks/WebhookNotificationCheck.swift
 DumptruckApp/Sources/Dumptruck/ContentView.swift
+DumptruckApp/Sources/Dumptruck/ControlInterface.swift
+DumptruckApp/Sources/Dumptruck/ControlSocketServer.swift
 DumptruckApp/Sources/Dumptruck/DumptruckCoreApplication.swift
 DumptruckApp/Sources/Dumptruck/ExistingVerificationModel.swift
 DumptruckApp/Sources/Dumptruck/ExistingVerificationProtocol.swift
@@ -104,6 +107,7 @@ assets/sfx/offload_start.mp3
 dumptruck/__init__.py
 dumptruck/cards.py
 dumptruck/cli.py
+dumptruck/ctl.py
 dumptruck/engine.py
 dumptruck/hasher.py
 dumptruck/identity.py

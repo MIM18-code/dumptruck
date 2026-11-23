@@ -450,6 +450,152 @@ if case .invalid = directoryJournal.load() {
     fatalError("directory journal was not rejected")
 }
 
+// Engine roots under /tmp arrive spelled /private/tmp (os.path.realpath);
+// the app's destinations drop /private (Foundation). Unrespelled, the record
+// is refused and the save disables the journal. Respelled, it saves.
+require(EnginePathSpelling.appSpelling("/private/tmp/x/Raws") == "/tmp/x/Raws",
+        "/private/tmp was not respelled")
+require(EnginePathSpelling.appSpelling("/private/var/folders/ab") == "/var/folders/ab",
+        "/private/var was not respelled")
+require(EnginePathSpelling.appSpelling("/private/tmpfoo/x") == "/private/tmpfoo/x",
+        "a path that only starts with the same letters was respelled")
+require(EnginePathSpelling.appSpelling("/Volumes/X10/Raws") == "/Volumes/X10/Raws",
+        "a /Volumes path changed")
+require(EnginePathSpelling.appSpelling("CLIPS/A001.mov") == "CLIPS/A001.mov",
+        "a relative file path changed")
+let tmpCardRoot = (plan.destinations[0] as NSString).appendingPathComponent("CARD")
+require(tmpCardRoot.hasPrefix("/tmp/"), "fixture destination is no longer under /tmp")
+let engineEvent: [String: Any] = [
+    "event": "file_done", "path": "A.mov", "outcome": "verified",
+    "status": ["/private" + tmpCardRoot: "verified"]]
+let respelled = EnginePathSpelling.respell(event: engineEvent)
+let respelledStatus = respelled["status"] as? [String: String] ?? [:]
+require(respelledStatus == [tmpCardRoot: "verified"], "event status keys were not respelled")
+require(respelled["path"] as? String == "A.mov", "event file path changed")
+func privateRootJob(statusRoot: String) -> Job {
+    let tmpJob = Job(label: "CARD", sourcePath: source, destinations: plan.destinations)
+    tmpJob.launchPlanSnapshot = plan
+    tmpJob.phase = .copying
+    tmpJob.recordDestinationStatus(root: statusRoot, status: "verified", bytes: 25)
+    return tmpJob
+}
+require(!JobJournal.recordShapeIsValid(JobJournalRecord(
+            job: privateRootJob(statusRoot: "/private" + tmpCardRoot), plan: plan)),
+        "a /private engine root should not match a /tmp destination")
+let respelledJournal = JobJournal(url: root.appendingPathComponent("respelled-jobs.json"))
+require(respelledJournal.save(records: [JobJournalRecord(
+            job: privateRootJob(statusRoot: Array(respelledStatus.keys)[0]), plan: plan)]).isSuccess,
+        "a job with a respelled /tmp engine root did not save")
+
+// Stored messages are bounded; the summary keeps that errors were dropped.
+let noisy = Job(label: "NOISY", sourcePath: source, destinations: [dest])
+noisy.appendMessages((0..<600).map {
+    JobMessage(severity: $0 < 550 ? .warning : .error, text: "file \($0)")
+})
+noisy.appendMessages([JobMessage(severity: .warning,
+                                 text: String(repeating: "x", count: 10_000))])
+let noisyRecord = JobJournalRecord(job: noisy, plan: nil)
+require(noisyRecord.messages.count == JobJournalRecord.maximumStoredMessages,
+        "stored messages were not capped")
+require(noisyRecord.messages.last?.severity == "error",
+        "the summary line lost that dropped messages included errors")
+require(noisyRecord.messages.last?.text.hasPrefix("502 more messages (50 errors, 452 warnings)") == true,
+        "summary line miscounted: \(noisyRecord.messages.last?.text ?? "")")
+require(noisyRecord.messages[0].text == "file 0", "kept messages are not the first ones")
+require(noisyRecord.errorTotal == 50 && noisyRecord.warningTotal == 551,
+        "the record lost the job's real message totals")
+let exported = HistoryExport.fields(for: noisyRecord)
+require(exported.contains("50") && exported.contains("551"),
+        "history export counted the stored messages, not the totals: \(exported)")
+let restoredNoisy = Job(label: "NOISY", sourcePath: source, destinations: [dest])
+restoredNoisy.replaceMessages(noisyRecord.messages.map {
+    JobMessage(severity: $0.severity == "error" ? .error : .warning, text: $0.text)
+}, errorTotal: noisyRecord.errorTotal, warningTotal: noisyRecord.warningTotal)
+require(restoredNoisy.errorCount == 50 && restoredNoisy.warningCount == 551,
+        "a restored job lost its real message totals")
+restoredNoisy.error("transfer interrupted before terminal verification")
+let resaved = JobJournalRecord(job: restoredNoisy, plan: nil)
+require(resaved.messages.last?.text.hasPrefix("503 more messages (51 errors, 452 warnings)") == true,
+        "a restored job's next save miscounted: \(resaved.messages.last?.text ?? "")")
+let shortJob = Job(label: "SHORT", sourcePath: source, destinations: [dest])
+shortJob.appendMessages([JobMessage(severity: .warning, text: String(repeating: "y", count: 10_000))])
+let shortRecord = JobJournalRecord(job: shortJob, plan: nil)
+require(shortRecord.messages.count == 1
+            && shortRecord.messages[0].text.count == JobJournalRecord.maximumStoredMessageLength,
+        "a long message was not trimmed")
+
+// A refused snapshot reports why but leaves the journal writable; the next
+// valid snapshot saves and clears it. Only a failed write disables it.
+let rejectingJournal = JobJournal(url: root.appendingPathComponent("rejecting-jobs.json"))
+let badRecord = JobJournalRecord(job: privateRootJob(statusRoot: "/private" + tmpCardRoot), plan: plan)
+require(rejectingJournal.save(records: [badRecord]).isFailure, "an unsafe record saved")
+require(rejectingJournal.isHealthy && rejectingJournal.failure == nil,
+        "a refused snapshot disabled the journal")
+require(rejectingJournal.rejection != nil, "a refused snapshot gave no reason")
+require(rejectingJournal.save(records: [JobJournalRecord(job: job, plan: plan)]).isSuccess,
+        "a valid snapshot did not save after a refused one")
+require(rejectingJournal.rejection == nil, "a successful save kept the old refusal")
+
+// Destination paths are checked folder by folder with lstat.
+let pathRoot = root.appendingPathComponent("PATHS").path
+let elsewhere = root.appendingPathComponent("ELSEWHERE/ProjectA").path
+try FileManager.default.createDirectory(atPath: pathRoot + "/Show", withIntermediateDirectories: true)
+try FileManager.default.createDirectory(atPath: elsewhere, withIntermediateDirectories: true)
+try FileManager.default.createSymbolicLink(atPath: pathRoot + "/ProjectA", withDestinationPath: elsewhere)
+require(DestinationPathCheck.unsafeComponent(from: pathRoot, to: pathRoot + "/ProjectA/Raws/A001")
+            == pathRoot + "/ProjectA",
+        "a symlinked parent of a folder that does not exist yet was missed")
+require(DestinationPathCheck.unsafeComponent(from: pathRoot, to: pathRoot + "/show/Raws") == nil,
+        "an existing folder typed in other capitals read as a symlink")
+require(DestinationPathCheck.unsafeComponent(from: pathRoot, to: pathRoot + "/New/Raws") == nil,
+        "a folder that does not exist yet was refused")
+require(DestinationPathCheck.unsafeComponent(from: pathRoot, to: pathRoot) == nil,
+        "the root itself was refused")
+require(DestinationPathCheck.unsafeComponent(from: pathRoot, to: root.path + "/OTHER") != nil,
+        "a path outside the root was accepted")
+require(DestinationPathCheck.unsafeComponent(from: pathRoot, to: pathRoot + "X/Raws") != nil,
+        "a sibling sharing the root's name prefix was accepted")
+require(pathRoot.hasPrefix("/tmp/") && DestinationPathCheck.hasNoSymlink(pathRoot + "/show"),
+        "a /tmp path, or an existing folder in other capitals, read as a symlink")
+require(!DestinationPathCheck.hasNoSymlink(pathRoot + "/ProjectA/Raws"),
+        "a path through a symlinked folder read as symlink-free")
+// A destination root that is itself a symlink: the engine would follow it.
+let linkRoot = root.appendingPathComponent("LINKROOT").path
+try FileManager.default.createSymbolicLink(atPath: linkRoot, withDestinationPath: pathRoot)
+require(DestinationPathCheck.firstUnsafeComponent(linkRoot + "/Show/Raws") == linkRoot,
+        "a symlinked destination root was not refused")
+require(DestinationPathCheck.firstUnsafeComponent(pathRoot + "/Show/Raws") == nil,
+        "the /tmp alias itself was refused")
+
+// Earlier custody damage follows the card folder across capital spellings.
+let damagedLane = pathRoot + "/Show/Raws/CARD"
+try FileManager.default.createDirectory(atPath: damagedLane, withIntermediateDirectories: true)
+let earlier = Job(label: "CARD", sourcePath: source, destinations: [pathRoot + "/Show/Raws"])
+earlier.custodyFailures[damagedLane] = LaterVerification(
+    date: Date(timeIntervalSince1970: 10), folder: damagedLane, passed: 1, failed: 1,
+    missing: 0, new: 0, unverifiable: 0, chainProblems: 0)
+let continuation = Job(label: "CARD", sourcePath: source, destinations: [pathRoot + "/show/raws"])
+continuation.laneRoots = [pathRoot + "/show/raws/CARD"]
+AppModel.carryCustodyFailures(into: continuation, from: [earlier])
+if !LaunchPlanValidation.isCaseSensitive(pathRoot) {
+    require(continuation.custodyFailures[pathRoot + "/show/raws/CARD"]?.folder == pathRoot + "/show/raws/CARD",
+            "earlier damage under another spelling did not follow the card folder")
+    // The damaged folder deleted before the continuation recreates it.
+    try FileManager.default.removeItem(atPath: damagedLane)
+    let fresh = Job(label: "CARD", sourcePath: source, destinations: [pathRoot + "/show/raws"])
+    fresh.laneRoots = [pathRoot + "/show/raws/CARD"]
+    AppModel.carryCustodyFailures(into: fresh, from: [earlier])
+    require(fresh.custodyFailures[pathRoot + "/show/raws/CARD"] != nil,
+            "earlier damage was dropped once its folder was deleted")
+    let folded = Job(label: "CARD", sourcePath: source, destinations: [pathRoot + "/\u{17F}how/raws"])
+    folded.laneRoots = [pathRoot + "/\u{17F}how/raws/CARD"]
+    AppModel.carryCustodyFailures(into: folded, from: [earlier])
+    require(!folded.custodyFailures.isEmpty,
+            "a name APFS folds to the same folder (long s) dropped earlier damage")
+    require(LaunchPlanValidation.caseSensitivityOfNearestFolder(pathRoot + "/missing/a/b") == false,
+            "case sensitivity was not read from the nearest existing folder")
+}
+
 print("JobJournalCheck: all assertions passed")
 }
 }

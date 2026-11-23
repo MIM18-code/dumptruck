@@ -439,6 +439,21 @@ enum DesktopQACheck {
         require(model.currentEnginePlanForRetry(retryPlan)?.args.contains("--reverify-existing") == false,
                 "explicit saved-settings choice must preserve original flags")
         require(model.retrySettingsSummary.contains("existing copies trusted"), "saved trust must be disclosed")
+        // Starting the retry uses it up: the bench must stop saying "Retry
+        // staged", or a second Start would run the same retry again.
+        model.pauseDispatch()   // the job queues; no engine runs here
+        model.inspecting = false   // the card read is not what this checks
+        let jobsBeforeRetry = model.jobs.count
+        model.start()
+        require(model.jobs.count == jobsBeforeRetry + 1 && model.jobs.first?.label == "RETRY",
+                "the staged retry starts: \(String(describing: model.startBlockedReason))")
+        require(model.stagedRetryLabel == nil, "a started retry is no longer staged")
+        if let started = model.jobs.first, started.phase == .queued {
+            model.removeQueued(job: started)
+        } else {
+            require(false, "the paused retry queues")
+        }
+        model.resumeDispatch()
         model.clearSource()
 
         // ---- DT-QA-04: a later verification lands on the job and the ledger.
@@ -501,6 +516,22 @@ enum DesktopQACheck {
         require(!good.wipeBlockers.contains { $0.hasPrefix("a later verification found damage") },
                 "a clean custody reread must remove the obsolete damage warning")
         require(!good.safeToWipe, "clearing damage must not revive old wipe authority")
+        // Checking the destination's parent folder (a Raws holding many
+        // cards) matches no job and leaves the journal writable.
+        model.recordLaterVerification(folder: dest + "/SHOW/Raws",
+                                      summary: summary(failed: [], missing: ["a"], new: []))
+        require(!good.hasCustodyFailure && model.journalError == nil,
+                "a check on a destination's parent folder landed on a job or broke the journal")
+        // The same card folder in other capitals is the same folder.
+        try FileManager.default.createDirectory(atPath: lane, withIntermediateDirectories: true)
+        if !LaunchPlanValidation.isCaseSensitive(dest) {
+            let otherCase = dest + "/show/raws/card_b"
+            model.recordLaterVerification(folder: otherCase, summary: summary(failed: ["y"], missing: [], new: []))
+            require(good.custodyFailure(for: lane) != nil && good.custodyFailures[otherCase] == nil
+                        && model.journalError == nil,
+                    "a check spelled in other capitals did not land under the job's own lane")
+            model.recordLaterVerification(folder: lane, summary: summary(failed: [], missing: [], new: []))
+        }
 
         // ---- R2-01: the real inspector settles every time, cancelled or not.
         //      Twelve back-to-back runs against the checkout's engine, every
@@ -1193,6 +1224,34 @@ enum DesktopQACheck {
                     "ejecting a drive mid-job must still ask first")
         } else {
             require(false, "a destination receiving a job was not named as mid-transfer")
+        }
+        // Cards share names. A turbo copy of an earlier card at this path must
+        // not speak for the card mounted now (MixPre, Joshua 2026-11-20); a
+        // run since this mount, or an unknown mount time, still does.
+        let oldTurbo = Job(label: "OLD_TURBO", sourcePath: shelfSource, destinations: [dest],
+                           createdDate: Date(timeIntervalSinceNow: -11 * 86_400))
+        oldTurbo.phase = .done
+        oldTurbo.fullyVerified = false
+        shelfModel.jobs = [oldTurbo]
+        var remounted = shelfVolume
+        remounted.appearedAt = Date(timeIntervalSinceNow: -60)
+        require(shelfModel.canEject(remounted) && shelfModel.ejectHold(remounted) == nil,
+                "an earlier card's turbo copy called the card mounted now UNVERIFIED")
+        shelfModel.volumes = [remounted]
+        require(shelfModel.dumpedCardVolumes.isEmpty,
+                "an earlier card's history made the card mounted now a dumped card")
+        shelfModel.volumes = [shelfVolume]
+        oldTurbo.phase = .copying
+        if case .transferRunning = shelfModel.ejectHold(remounted) {} else {
+            require(false, "a live transfer from before a replug no longer blocked eject")
+        }
+        oldTurbo.phase = .done
+        if case .copiesUnverified = shelfModel.ejectHold(shelfVolume) {} else {
+            require(false, "with no mount time the unverified run must still warn")
+        }
+        remounted.appearedAt = Date(timeIntervalSinceNow: -12 * 86_400)
+        if case .copiesUnverified = shelfModel.ejectHold(remounted) {} else {
+            require(false, "an unverified run of the card mounted now must still warn")
         }
         let oneDrive = Job(label: "ONE_DRIVE", sourcePath: shelfSource, destinations: [dest])
         oneDrive.phase = .done
