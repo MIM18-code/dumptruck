@@ -427,8 +427,8 @@ struct JobHistoryView: View {
             exportNotification = "Generating shoot-day wrap report for \(count) card(s)…"
 
             let title = count == 1
-                ? "Shoot Day Wrap Report — \(targetJobs[0].label)"
-                : "Shoot Day Wrap Report — \(count) Cards"
+                ? "Shoot Day Wrap Report: \(targetJobs[0].label)"
+                : "Shoot Day Wrap Report: \(count) Cards"
 
             WrapReportRunner.generate(
                 receiptPaths: receiptPaths,

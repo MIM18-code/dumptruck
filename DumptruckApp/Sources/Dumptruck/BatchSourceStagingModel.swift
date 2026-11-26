@@ -106,7 +106,7 @@ final class BatchSourceCandidate: ObservableObject, Identifiable {
         case .awaitingDestinations: return "Waiting for destinations"
         case .inspecting: return "Inspecting…"
         case .ready: return "Ready"
-        case .refused(let reason): return "Refused — " + reason
+        case .refused(let reason): return "Refused: " + reason
         }
     }
 }

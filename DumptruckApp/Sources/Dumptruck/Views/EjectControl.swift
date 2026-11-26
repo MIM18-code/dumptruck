@@ -53,7 +53,7 @@ struct EjectControl: View {
                 }
                 .buttonStyle(HoverHighlightButtonStyle())
                 .help(reason)
-                .accessibilityLabel("Eject \(volume.name) — \(reason)")
+                .accessibilityLabel("Eject \(volume.name): \(reason)")
             }
         }
     }
@@ -65,7 +65,7 @@ struct EjectControl: View {
         let labels = model.safeWatchesEndedByEjecting(volume)
         guard let first = labels.first else { return "Eject" }
         let more = labels.count > 1 ? " and \(labels.count - 1) more" : ""
-        return "Eject — ends the SAFE watch on \(first)\(more)"
+        return "Eject. Ends the SAFE watch on \(first)\(more)."
     }
 }
 

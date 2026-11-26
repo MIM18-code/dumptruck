@@ -34,9 +34,10 @@ struct HelpGuideView: View {
                     on its tile and it moves to the left rail as the source. \
                     You can also drag a tile onto a rail. A folder can be a \
                     source too, via "Choose Source Folder…" at the bottom of \
-                    the left rail or the folder button on a drive's tile. To \
-                    copy only some clips, use "Choose Source Files…" or drag \
-                    the files onto the left rail.
+                    the left rail or the folder button on a drive's tile or \
+                    staged source card. To copy only some clips, use "Choose \
+                    Source Files…", click the folder button on a staged source \
+                    card, or drag the files onto the left rail.
 
                     2.  Click Destination on two drives' tiles. They move to \
                     the right rail. One drive works; two separate drives are \
@@ -149,7 +150,7 @@ struct HelpGuideView: View {
                     click. The folder template in Settings › Organize controls \
                     where cards land on each drive, for example \
                     Project/Raws/CardName. To copy into an existing folder \
-                    instead, click "Choose Folder" on a destination drive's \
+                    instead, click the folder button on a destination drive's \
                     card (or press ⇧⌘O) and pick it; the same folder is \
                     used on every destination.
                     """)
@@ -280,8 +281,8 @@ struct HelpGuideView: View {
                     section("Organize", """
                     The project name and folder template control where cards \
                     land on each drive, for example Project/Raws. The card \
-                    name folder is always appended last. That folder is the \
-                    continuation key: when the card comes back with more \
+                    name folder is always appended last. That folder is how \
+                    Dumptruck recognizes top-ups: when the card comes back with more \
                     footage, Dumptruck finds its earlier copies by resolving \
                     the same path. Which is why date tokens do not belong in \
                     the standing template; a folder that moves every day \

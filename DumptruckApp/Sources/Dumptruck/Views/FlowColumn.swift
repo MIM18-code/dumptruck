@@ -242,7 +242,7 @@ struct BatchBenchCard: View {
                 Image(systemName: "square.stack.3d.up").font(.title2)
                     .foregroundStyle(Semantics.sourceText)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Batch — ^[\(staging.candidates.count) card](inflect: true)")
+                    Text("Batch: ^[\(staging.candidates.count) card](inflect: true)")
                         .font(.headline)
                     // Wraps at the narrow window: cut in the middle it read
                     // "351 file…_A + SHUTTLE_B".
@@ -426,7 +426,7 @@ struct EmptyFlowState: View {
             // rail, step 2 used to keep asking for them (2026-11-11).
             let staged = model.destinationPaths.count
             VStack(alignment: .leading, spacing: 8) {
-                step(1, "Insert a card — it appears on the shelf below")
+                step(1, "Insert a card and it appears on the shelf below")
                 step(2, staged == 0 ? "Stage two drives as destinations"
                         : staged == 1 ? "1 destination staged. Add a second drive to clear cards"
                         : "\(staged) destinations staged",
@@ -439,7 +439,7 @@ struct EmptyFlowState: View {
         } actions: {
             Button("Choose Folder as Source…") { model.chooseFolder(as: "source") }
                 .buttonStyle(BrandProminentButtonStyle())
-                .help("Copy FROM any folder — not just a whole card")
+                .help("Copy from any folder, not just a whole card")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -611,7 +611,7 @@ struct ReceiptStrip: View {
                     }
                     .buttonStyle(.link).hoverHighlight()
                     .font(.caption)
-                    .help("Hide these receipts from the strip. Nothing is deleted — every record stays in History.")
+                    .help("Hide these receipts from the strip. Nothing is deleted; every record stays in History.")
                     .accessibilityLabel("Clear receipts from the strip; records remain in History")
                     // Counts what the History sheet actually lists — every
                     // job, not just the receipts (facelift review).
@@ -828,7 +828,7 @@ struct BenchCard: View {
                 Image(systemName: "sdcard").font(.title2)
                     .foregroundStyle(Semantics.sourceText)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(model.inspection?.formatName ?? "Card") \(model.label) — seen \(model.inspection?.mounts ?? 0)× before")
+                    Text("\(model.inspection?.formatName ?? "Card") \(model.label), seen \(model.inspection?.mounts ?? 0)× before")
                         .font(.headline)
                     Text(proposalSummary(proposal))
                         .font(Typo.safetyBody)
@@ -851,10 +851,10 @@ struct BenchCard: View {
                     model.continueKnownCard()
                 }
                 .buttonStyle(BrandProminentButtonStyle())
-                .help("Stage this card's previous drives and start — the same checks as a manual Start run first")
+                .help("Stage this card's previous drives and start. The same checks as a manual Start run first.")
                 Button("Set Up Manually…") { proposalDismissed = true }
                     .buttonStyle(.bordered)
-                    .help("Open the full bench — pick drives, folders, and the card name yourself")
+                    .help("Open the full bench to pick drives, folders, and the card name yourself.")
                 Spacer()
             }
         }
@@ -880,7 +880,7 @@ struct BenchCard: View {
                     if model.inspecting {
                         Text("Reading card…").font(.headline)
                     } else if let ins = model.inspection {
-                        Text("\(ins.formatName) — \(fileCount(ins.files)), \(bytesString(ins.bytes))")
+                        Text("\(ins.formatName) · \(fileCount(ins.files)), \(bytesString(ins.bytes))")
                             .font(.headline)
                     } else if let src = model.sourcePath {
                         Text(model.endpointDisplayName(src)).font(.headline)
@@ -911,7 +911,7 @@ struct BenchCard: View {
                     // banner text carries the continuation fact; verified
                     // quantities appear only in lanes, from engine events.
                     HStack(spacing: 8) {
-                        Label("Seen \(ins.mounts)× before — continuing into its existing card folder",
+                        Label("Seen \(ins.mounts)× before. Continuing into its existing card folder.",
                               systemImage: "arrow.triangle.2.circlepath")
                             .font(.callout.weight(.medium))
                         Spacer()
@@ -957,7 +957,7 @@ struct BenchCard: View {
                     .monospaced()
                     .frame(minWidth: 130, idealWidth: 220, maxWidth: 220)
                 if !simpleView {
-                    Text("← continuation key")
+                    Text("← folder name for top-ups")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
@@ -1667,7 +1667,7 @@ struct JobHeaderBand: View {
                 .foregroundStyle(.tertiary)
         }
         .buttonStyle(HoverHighlightButtonStyle())
-        .help("Four mini games while the card hauls — optional, in a sheet, never over your job")
+        .help("Four mini games while the card hauls. Optional, in a sheet, never over your job.")
     }
 
     /// Sealing is the one wait where throughput is legitimately zero, and a
@@ -1683,7 +1683,7 @@ struct JobHeaderBand: View {
             // "not yet" forever — omit it entirely in that case. A report
             // the engine FAILED to write says so plainly (Kimi F4).
             if job.reportFailed {
-                Label("Report failed — copy state unaffected", systemImage: "xmark.circle")
+                Label("Report failed. Copies are unaffected.", systemImage: "xmark.circle")
                     .font(Typo.safety)
                     .foregroundStyle(Semantics.dangerText)
             } else if reportsEnabled {
@@ -1761,7 +1761,7 @@ struct JobHeaderBand: View {
                 if job.throttleAdvisory {
                     // An observation about this job's own numbers. The cause is
                     // named as a possibility, never as a finding.
-                    Label("throughput well below this job's average — possible thermal or bus limit",
+                    Label("throughput well below this job's average (possible thermal or bus limit)",
                           systemImage: "thermometer.medium")
                         .font(Typo.safety)
                         .foregroundStyle(Semantics.warningText)

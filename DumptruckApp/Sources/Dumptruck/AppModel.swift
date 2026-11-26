@@ -67,7 +67,7 @@ enum EngineRootResolver {
                     validEmbeddedRoot = normalized.path
                 } else {
                     reject("the packaged engine at \(normalized.path) is missing "
-                           + "(dumptruck/cli.py not found) — was it uninstalled or "
+                           + "(dumptruck/cli.py not found). Was it uninstalled or "
                            + "upgraded?", explicitOverride: explicitOverride)
                 }
             } catch {
@@ -110,11 +110,11 @@ enum EngineRootResolver {
         if let explicitOverride {
             setEmbeddedRejectionNotice(
                 "Packaged engine not used: \(sentence) Running the operator-selected "
-                + "engine at \(explicitOverride) instead — verify Settings › Engine.")
+                + "engine at \(explicitOverride) instead. Check Settings > Engine.")
         } else {
             setEmbeddedRejectionNotice(
                 "Packaged engine not used: \(sentence) Running the engine found "
-                + "at the fallback location instead — verify Settings › Engine.")
+                + "at the fallback location instead. Check Settings > Engine.")
         }
     }
 
@@ -1407,7 +1407,7 @@ final class AppModel: ObservableObject {
     /// the source, not only sit inside it, and the old wording ("a destination
     /// inside the source") described the wrong case (Joshua, 2026-09-28).
     static let sourceOverlapReason = "That folder overlaps the source (one is inside "
-        + "the other) — the copy would end up copying itself."
+        + "the other), so the copy would end up copying itself."
 
     /// nil when the assignment is legal; otherwise the reason it is not —
     /// the startOrExplain doctrine extended to assignment: never a silently
@@ -1420,8 +1420,8 @@ final class AppModel: ObservableObject {
         }
         if jobs.contains(where: { $0.isRunning &&
             ([$0.sourcePath] + $0.destinations).contains(where: { pathsOverlap($0, path) }) }) {
-            return "\(endpointDisplayName(path)) is being written by a running transfer — "
-                 + "wait for it to finish before changing its role"
+            return "\(endpointDisplayName(path)) is being written by a running transfer. "
+                 + "Wait for it to finish before changing its role."
         }
         if role == .destination, stagedSourcePaths.contains(where: { pathsOverlap(path, $0) }) {
             return Self.sourceOverlapReason
@@ -1556,7 +1556,7 @@ final class AppModel: ObservableObject {
                 guard DestinationPathCheck.unsafeComponent(from: anchorStandard, to: standard) == nil,
                       let rel = DestinationFolderProjection.relativePath(
                           selected: path, under: vol.path) else {
-                    lastSetupError = "That folder uses a symlink — choose the real folder so the same path can be mirrored on every drive"
+                    lastSetupError = "That folder uses a symlink. Choose the real folder so the same path can be used on every drive."
                     return false
                 }
                 nestedRels.insert(rel)
@@ -1565,8 +1565,8 @@ final class AppModel: ObservableObject {
             if !anchors.contains(vol.path) { anchors.append(vol.path) }
         }
         guard nestedRels.count <= 1 else {
-            lastSetupError = "Dropped folders sit at different paths on their drives — "
-                + "destinations share ONE mirrored folder. Drop drive roots, or "
+            lastSetupError = "Dropped folders sit at different paths on their drives. "
+                + "Destinations share one folder path. Drop drive roots, or "
                 + "folders with the same path on each drive."
             return false
         }
@@ -1681,7 +1681,10 @@ final class AppModel: ObservableObject {
         panel.canChooseFiles = false
         panel.canCreateDirectories = role == .destination
         panel.directoryURL = boundary.map { URL(fileURLWithPath: $0) }
-        panel.prompt = role == .source ? "Use as Source" : "Mirror to Destinations"
+        panel.prompt = role == .source ? "Use as Source" : "Select Folder"
+        if role == .destination {
+            panel.message = "Copies go into this folder. The same folder path is used on all destinations."
+        }
         if panel.runModal() == .OK, let path = panel.url?.path {
             _ = useChosenFolder(path, inside: boundary, as: role)
         }
@@ -1708,8 +1711,9 @@ final class AppModel: ObservableObject {
     /// Pick clips as the source, the panel's version of dropping files on
     /// the rail. Files on a drive copy straight from it (a selection set);
     /// files on this Mac stage as clones. Opened from a drive, the panel
-    /// starts there.
-    func chooseSourceFiles(inside start: String? = nil) {
+    /// starts there. When opened from a staged source card, the pick
+    /// replaces that source instead of creating a batch beside it.
+    func chooseSourceFiles(inside start: String? = nil, replacingCurrentSource: Bool = false) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -1718,7 +1722,39 @@ final class AppModel: ObservableObject {
         panel.prompt = "Use as Source"
         panel.message = "Pick the clips to offload. Hold ⌘ or ⇧ to pick several."
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-        stageDroppedSources(panel.urls.map(\.path))
+        _ = stagePickedSourceFiles(panel.urls.map(\.path),
+                                   replacingCurrentSource: replacingCurrentSource)
+    }
+
+    @discardableResult
+    func stagePickedSourceFiles(_ rawPaths: [String], replacingCurrentSource: Bool) -> Bool {
+        guard replacingCurrentSource else {
+            return stageDroppedSources(rawPaths) != nil
+        }
+        let split: (ordered: [String], stagedSet: String?)
+        do {
+            split = try Self.splitDroppedPaths(rawPaths)
+        } catch {
+            lastSetupError = error.localizedDescription
+            return false
+        }
+        guard split.ordered.count == 1 else {
+            if let stagedSet = split.stagedSet { LooseSourceStaging.remove(stagedSet) }
+            return false
+        }
+        let staged = split.ordered[0]
+        let origin = LooseSourceStaging.sourceLocationForDisplay(staged)
+        if !origin.isEmpty, origin != staged,
+           let reason = assignmentBlockedReason(origin, as: .source) {
+            lastSetupError = reason
+            if let stagedSet = split.stagedSet { LooseSourceStaging.remove(stagedSet) }
+            return false
+        }
+        if assign(staged, as: .source) {
+            return true
+        }
+        if let stagedSet = split.stagedSet { LooseSourceStaging.remove(stagedSet) }
+        return false
     }
 
     /// Set/replace the shared destination folder from a real folder on one
@@ -1736,11 +1772,11 @@ final class AppModel: ObservableObject {
         let selectedStandard = URL(fileURLWithPath: selected).standardizedFileURL.path
         let anchorStandard = URL(fileURLWithPath: anchor).standardizedFileURL.path
         guard DestinationPathCheck.isContained(selectedStandard, in: anchorStandard) else {
-            lastSetupError = "That folder leaves its drive — choose a real folder on the destination drive"
+            lastSetupError = "That folder leaves its drive. Choose a real folder on the destination drive."
             return false
         }
         guard DestinationPathCheck.unsafeComponent(from: anchorStandard, to: selectedStandard) == nil else {
-            lastSetupError = "That folder uses a symlink — choose the real folder so the same path can be mirrored on every drive"
+            lastSetupError = "That folder uses a symlink. Choose the real folder so the same path can be used on every drive."
             return false
         }
         if let reason = assignmentBlockedReason(selected, as: .destination) {
@@ -1791,14 +1827,14 @@ final class AppModel: ObservableObject {
         }
         guard DestinationPathCheck.unsafeComponent(
             from: URL(fileURLWithPath: anchor).standardizedFileURL.path, to: path) == nil else {
-            lastSetupError = "That folder uses a symlink — choose the real folder on the drive"
+            lastSetupError = "That folder uses a symlink. Choose the real folder on the drive."
             return false
         }
         // "On this drive" means the same filesystem: a different volume
         // mounted inside the drive's folder tree is another drive.
         guard let anchorDevice = Self.deviceNumber(anchor),
               Self.deviceNumber(path) == anchorDevice else {
-            lastSetupError = "That folder is on a different drive — choose a folder on \(endpointDisplayName(anchor))"
+            lastSetupError = "That folder is on a different drive. Choose a folder on \(endpointDisplayName(anchor))."
             return false
         }
         if let reason = assignmentBlockedReason(path, as: .destination) {
@@ -1896,7 +1932,7 @@ final class AppModel: ObservableObject {
         guard LaunchPlanValidation.isStructurallySafe(saved),
               validateRetryPlan(plan) else {
             if lastSetupError == nil {
-                lastSetupError = "The saved retry flags or invocation are unsafe — retry refused"
+                lastSetupError = "The saved retry flags or invocation are unsafe. Retry refused."
             }
             return false
         }
@@ -1944,12 +1980,12 @@ final class AppModel: ObservableObject {
         var sourceDirectory: ObjCBool = false
         guard fm.fileExists(atPath: plan.src, isDirectory: &sourceDirectory),
               sourceDirectory.boolValue else {
-            lastSetupError = "The original source is not mounted — retry was not staged"
+            lastSetupError = "The original source is not mounted. Retry was not staged."
             return false
         }
         guard plan.rawRoots.count == plan.rootFileIDs.count,
               plan.rawRoots.count == plan.rootVolumeUUIDs.count else {
-            lastSetupError = "The saved destination identity record is incomplete — retry refused"
+            lastSetupError = "The saved destination identity record is incomplete. Retry refused."
             return false
         }
         func identityHolds(_ path: String, uuid: String?, fid: String?) -> Bool {
@@ -1959,7 +1995,7 @@ final class AppModel: ObservableObject {
             return Self.fileID(path) == fid
         }
         guard identityHolds(plan.src, uuid: plan.srcVolumeUUID, fid: plan.srcFileID) else {
-            lastSetupError = "The original source was replaced or remounted — retry refused"
+            lastSetupError = "The original source was replaced or remounted. Retry refused."
             return false
         }
         for (index, root) in plan.rawRoots.enumerated() {
@@ -1968,18 +2004,18 @@ final class AppModel: ObservableObject {
                   isDirectory.boolValue,
                   identityHolds(root, uuid: plan.rootVolumeUUIDs[index],
                                 fid: plan.rootFileIDs[index]) else {
-                lastSetupError = "A saved destination was replaced, removed, or remounted — retry refused"
+                lastSetupError = "A saved destination was replaced, removed, or remounted. Retry refused."
                 return false
             }
         }
         for (index, root) in plan.rawRoots.enumerated() {
             guard !pathsOverlap(plan.src, root) else {
-                lastSetupError = "The saved source and destination overlap — retry refused"
+                lastSetupError = "The saved source and destination overlap. Retry refused."
                 return false
             }
             let dest = plan.dests.indices.contains(index) ? plan.dests[index] : ""
             guard !dest.isEmpty else {
-                lastSetupError = "The saved rendered destination is incomplete — retry refused"
+                lastSetupError = "The saved destination path is incomplete. Retry refused."
                 return false
             }
             // Every existing folder on the way, even when the last one is
@@ -1987,7 +2023,7 @@ final class AppModel: ObservableObject {
             // only at launch.
             guard DestinationPathCheck.firstUnsafeComponent(dest) == nil,
                   DestinationPathCheck.unsafeComponent(from: root, to: dest) == nil else {
-                lastSetupError = "The saved destination leaves its drive or uses a symlink — retry refused"
+                lastSetupError = "The saved destination leaves its drive or uses a symlink. Retry refused."
                 return false
             }
             if !fm.fileExists(atPath: dest) {
@@ -1998,7 +2034,7 @@ final class AppModel: ObservableObject {
                     journalPlan(plan), root: root)
                 guard allowed.contains(dest),
                       dest == root || dest.hasPrefix(root + "/") else {
-                    lastSetupError = "The saved rendered destination escapes its drive — retry refused"
+                    lastSetupError = "The saved destination path escapes its drive. Retry refused."
                     return false
                 }
             }
@@ -2028,14 +2064,14 @@ final class AppModel: ObservableObject {
     /// choice. Destination identity is checked again at Start.
     func currentEnginePlanForRetry(_ frozen: LaunchPlan) -> LaunchPlan? {
         guard LaunchPlanValidation.isStructurallySafe(journalPlan(frozen)) else {
-            lastSetupError = "The saved retry flags or invocation are unsafe — retry refused"
+            lastSetupError = "The saved retry flags or invocation are unsafe. Retry refused."
             return nil
         }
         let fm = FileManager.default
         var isDirectory: ObjCBool = false
         guard fm.fileExists(atPath: engineRoot, isDirectory: &isDirectory),
               isDirectory.boolValue else {
-            lastSetupError = "The current engine folder is missing — retry refused"
+            lastSetupError = "The current engine folder is missing. Retry refused."
             return nil
         }
         guard fm.fileExists(atPath: enginePython, isDirectory: &isDirectory),
@@ -2043,7 +2079,7 @@ final class AppModel: ObservableObject {
               let attrs = try? fm.attributesOfItem(atPath: enginePython),
               let permissions = (attrs[.posixPermissions] as? NSNumber)?.intValue,
               permissions & 0o111 != 0 else {
-            lastSetupError = "The current engine Python is missing or not executable — retry refused"
+            lastSetupError = "The current engine Python is missing or not executable. Retry refused."
             return nil
         }
         var retryArguments = frozen.args
@@ -2266,7 +2302,7 @@ final class AppModel: ObservableObject {
                 // A broken/absent engine must be VISIBLE, never a plausible
                 // volume-name label that silently misfiles the continuation.
                 if !self.labelEditedByUser { self.label = "" }
-                let message = "Could not inspect this source — check the engine folder "
+                let message = "Could not inspect this source. Check the engine folder "
                     + "(Settings > Engine), then re-select the source."
                 self.inspectionError = message
                 self.lastSetupError = message
@@ -2461,8 +2497,8 @@ final class AppModel: ObservableObject {
     static let noDestinationReason = "Add at least one destination"
     static let readingCardReason = "Reading card…"
     static let nameCardReason = "Name the card"
-    static let sourceChangedReason = "The card changed after it was read — "
-        + "re-read it before starting"
+    static let sourceChangedReason = "The card changed after it was read. "
+        + "Re-read it before starting."
 
     /// Reasons that are simply the next step of ordinary setup, not a
     /// problem. The bench footer showed them in warning orange right after a
@@ -2476,10 +2512,10 @@ final class AppModel: ObservableObject {
     /// Refusals that block every launch, single card or batch.
     private var launchBlockedReason: String? {
         if journalError != nil {
-            return "Job journal unavailable — resolve it before starting a transfer"
+            return "Job journal unavailable. Resolve it before starting a transfer."
         }
         if let orphanRecoveryError {
-            return "Interrupted engine recovery is blocked — \(orphanRecoveryError)"
+            return "Interrupted engine recovery is blocked: \(orphanRecoveryError)"
         }
         return engineConfigurationError
     }
@@ -2517,8 +2553,8 @@ final class AppModel: ObservableObject {
         if staging.canStartReadyCards { return nil }
         if !staging.isInspecting, staging.hasRefusedCard {
             return staging.candidates.count == 1
-                ? "The card in the batch can't start — Review Batch shows why"
-                : "No card in the batch can start — Review Batch shows why"
+                ? "The card in the batch can't start. Review Batch shows why."
+                : "No card in the batch can start. Review Batch shows why."
         }
         let waiting = max(staging.notReadyCount, 1)
         return Self.batchWaitingPrefix + (waiting == 1 ? "1 card in the batch…"
@@ -2838,9 +2874,9 @@ final class AppModel: ObservableObject {
                 // verdict stays FAILED so it can never pass for a backup
                 // (Joshua, 2026-09-28).
                 job.error("Never started: Dumptruck quit while this card was queued. "
-                          + "Nothing was copied — " + Job.Verdict.failed.displayLine)
+                          + "Nothing was copied. " + Job.Verdict.failed.displayLine)
             } else {
-                job.error("Dumptruck was relaunched before this transfer settled — "
+                job.error("Dumptruck was relaunched before this transfer settled. "
                           + Job.Verdict.failed.displayLine)
             }
             // finishedDate stays NIL: the relaunch instant is a recovery,
@@ -3110,7 +3146,7 @@ final class AppModel: ObservableObject {
         }
         guard startJobSourceMonitoring(job) else {
             job.phase = .failed
-            job.error("could not monitor the source for changes — run refused")
+            job.error("Could not monitor the source for changes. Run refused.")
             finalizeTerminal(job)
             return
         }
@@ -3174,7 +3210,7 @@ final class AppModel: ObservableObject {
         if let attrs = try? fm.attributesOfItem(atPath: plan.src),
            (attrs[.type] as? FileAttributeType) == .typeSymbolicLink {
             job.phase = .failed
-            job.error("source became a symbolic link while queued — refused")
+            job.error("Source became a symbolic link while queued. Run refused.")
             finalizeTerminal(job)
             return
         }
@@ -3195,8 +3231,8 @@ final class AppModel: ObservableObject {
         }
         if !identityHolds(plan.src, uuid: plan.srcVolumeUUID, fid: plan.srcFileID) {
             job.phase = .failed
-            job.error("the volume at \(plan.src) was replaced or remounted while this "
-                      + "job was queued — this is not the card that was queued. "
+            job.error("The volume at \(plan.src) was replaced or remounted while this "
+                      + "job was queued. This is not the card that was queued. "
                       + "Re-insert it and start again.")
             finalizeTerminal(job)
             return
@@ -3229,7 +3265,7 @@ final class AppModel: ObservableObject {
         job.phase = .starting
         guard persistJournal() else {
             job.phase = .failed
-            job.error("job journal could not record the launch — not started; "
+            job.error("Job journal could not record the launch, so it was not started. "
                       + Job.Verdict.failed.displayLine)
             finalizeTerminal(job)
             return
@@ -3642,7 +3678,7 @@ final class AppModel: ObservableObject {
             if !mirrored.isEmpty,
                DestinationPathCheck.unsafeComponent(from: root, to: mirroredBase) != nil {
                 return .failure(PlanError(message:
-                    "Mirrored destination folder changed to a symlink: \(mirroredBase). "
+                    "Destination folder changed to a symlink: \(mirroredBase). "
                     + "Choose the real folder again."))
             }
             // The path as rendered, not Foundation's resolved spelling: that
@@ -3659,7 +3695,7 @@ final class AppModel: ObservableObject {
             guard FileManager.default.fileExists(atPath: root, isDirectory: &isDir),
                   isDir.boolValue else {
                 return .failure(PlanError(message:
-                    "Destination \(root) is not a folder that exists — is the drive mounted?"))
+                    "Destination \(root) is not a folder that exists. Is the drive mounted?"))
             }
             // Planning only VALIDATES — rendered template folders are created
             // in launch(), immediately before the engine runs, so a plan that
@@ -3752,7 +3788,7 @@ final class AppModel: ObservableObject {
                 _ = stopJobSourceMonitoring(id)
             }
             jobs = priorJobs
-            lastSetupError = "could not monitor the source for changes — batch queue refused"
+            lastSetupError = "Could not monitor the source for changes. Batch queue refused."
             return .failure(.monitorFailed("Failed to monitor candidate source changes"))
         }
 
@@ -4232,7 +4268,7 @@ final class AppModel: ObservableObject {
                     guard let obj = parsed else {
                         job.engineProtocolOK = false
                         if job.errorCount == 0 {
-                            job.error("engine emitted a malformed protocol line — result NOT trusted")
+                            job.error("Engine emitted a malformed protocol line. Result not trusted.")
                         }
                         AppModel.terminateEngine(p)
                         return
@@ -4240,14 +4276,14 @@ final class AppModel: ObservableObject {
                     let event = obj["event"] as? String
                     if job.sawOffloadComplete {
                         job.engineProtocolOK = false
-                        job.error("engine sent events after its terminal event — result NOT trusted")
+                        job.error("Engine sent events after its terminal event. Result not trusted.")
                         AppModel.terminateEngine(p)
                         return
                     }
                     if event == "engine_hello" {
                         if job.sawEngineHello {
                             job.engineProtocolOK = false
-                            job.error("engine repeated its handshake — result NOT trusted")
+                            job.error("Engine repeated its handshake. Result not trusted.")
                             AppModel.terminateEngine(p)
                             return
                         }
@@ -4255,7 +4291,7 @@ final class AppModel: ObservableObject {
                         job.engineProtocolOK = (obj["protocol"] as? Int)
                             == EngineContract.protocolVersion
                         if !job.engineProtocolOK {
-                            job.error("engine protocol mismatch — this app needs protocol "
+                            job.error("Engine protocol mismatch. This app needs protocol "
                                       + "\(EngineContract.protocolVersion). "
                                       + "Update the engine folder (Settings > Engine).")
                             AppModel.terminateEngine(p)
@@ -4267,8 +4303,8 @@ final class AppModel: ObservableObject {
                     // must be the first event in the stream.
                     guard job.sawEngineHello, job.engineProtocolOK else {
                         if job.errorCount == 0 {
-                            job.error("engine sent data before the required protocol handshake — "
-                                      + "result NOT trusted")
+                            job.error("Engine sent data before the required protocol handshake. "
+                                      + "Result not trusted.")
                         }
                         AppModel.terminateEngine(p)
                         return
@@ -4276,7 +4312,7 @@ final class AppModel: ObservableObject {
                     if event == "offload_complete",
                        (obj["protocol"] as? Int) != EngineContract.protocolVersion {
                         job.engineProtocolOK = false
-                        job.error("terminal event protocol mismatch — result NOT trusted")
+                        job.error("Terminal event protocol mismatch. Result not trusted.")
                         AppModel.terminateEngine(p)
                         return
                     }
@@ -4287,8 +4323,8 @@ final class AppModel: ObservableObject {
                         // leave earlier optimistic state standing (round-15 PR
                         // review finding 2 — fail-open on malformed terminal).
                         job.engineProtocolOK = false
-                        job.error("engine sent a malformed \(event ?? "?") event — "
-                                  + "result NOT trusted")
+                        job.error("Engine sent a malformed \(event ?? "?") event. "
+                                  + "Result not trusted.")
                         AppModel.terminateEngine(p)
                         return
                     }
@@ -4386,16 +4422,16 @@ final class AppModel: ObservableObject {
                         job.safeToWipe = false
                         if job.errorCount == 0 {
                             if stream.streamFailed {
-                                job.error("engine emitted an oversized/non-delimited protocol line — "
-                                          + "result NOT trusted")
+                                job.error("Engine emitted an oversized/non-delimited protocol line. "
+                                          + "Result not trusted.")
                             } else if !stderrSnapshot.isEmpty {
                                 job.error(String(stderrSnapshot.suffix(600)))
                             } else if proc.terminationReason == .uncaughtSignal {
-                                job.error("engine was terminated by signal \(proc.terminationStatus) "
-                                          + "before a trusted terminal result — copy is incomplete")
+                                job.error("Engine was terminated by signal \(proc.terminationStatus) "
+                                          + "before a trusted terminal result. Copy is incomplete.")
                             } else {
-                                job.error("engine exited with status \(proc.terminationStatus) "
-                                          + "before a trusted terminal result — copy is incomplete")
+                                job.error("Engine exited with status \(proc.terminationStatus) "
+                                          + "before a trusted terminal result. Copy is incomplete.")
                             }
                         }
                     } else if !job.sawEngineHello || !job.sawOffloadComplete
@@ -4407,8 +4443,8 @@ final class AppModel: ObservableObject {
                         job.fullyVerified = false
                         job.safeToWipe = false
                         if job.engineProtocolOK {
-                            job.error("engine exited without its terminal event — "
-                                      + "result NOT trusted (engine/app version skew?)")
+                            job.error("Engine exited without its terminal event. "
+                                      + "Result not trusted (engine/app version skew?).")
                         }
                     } else if job.isRunning {
                         // ONLY NOW — clean exit, protocol complete — apply the
@@ -4561,7 +4597,7 @@ final class AppModel: ObservableObject {
             job.currentFile = ""
             job.stopThroughput()
         case "identity_ambiguous":
-            job.warn("card matches multiple known cards ambiguously — treated as NEW; check the label")
+            job.warn("Card matches multiple known cards ambiguously. Treated as new; check the label.")
         case "refused_label_collision", "job_failed":
             job.phase = obj["event"] as? String == "job_failed" ? .failed : .refused
             job.error((obj["message"] ?? obj["error"]) as? String ?? "engine refused/failed")
@@ -4871,7 +4907,7 @@ final class AppModel: ObservableObject {
         guard UserDefaults.standard.object(forKey: Pref.notifyOnCompletion) == nil
               || UserDefaults.standard.bool(forKey: Pref.notifyOnCompletion) else { return }
         let content = UNMutableNotificationContent()
-        content.title = "Dumptruck — \(job.label)"
+        content.title = "Dumptruck: \(job.label)"
         let hasReport = job.reportPath != nil
         switch job.verdict {
         case .safeToWipe:
@@ -5281,16 +5317,16 @@ final class AppModel: ObservableObject {
         /// One line for the eject control's tooltip.
         var summary: String {
             switch self {
-            case .transferRunning: return "A transfer is using this drive — eject asks first"
-            case .copiesUnverified: return "Copies not verified — eject asks first"
-            case .custodyDamaged: return "A later check found a damaged copy — eject asks first"
+            case .transferRunning: return "A transfer is using this drive. Eject asks first."
+            case .copiesUnverified: return "Copies not verified. Eject asks first."
+            case .custodyDamaged: return "A later check found a damaged copy. Eject asks first."
             case .verifiedNotSafe(_, let singleDrive):
-                return singleDrive ? "Verified to one drive only — keep the card"
-                                   : "Verified, but not yet safe to clear — keep the card"
-            case .verdictNotCurrent: return "The earlier verdict no longer covers this card — eject asks first"
-            case .destinationCheckPending: return "Still re-checking the copies — don't wipe yet"
-            case .notOffloaded: return "Not offloaded yet — eject asks first"
-            case .journalUnavailable: return "Job journal unavailable — eject asks first"
+                return singleDrive ? "Verified to one drive only. Keep the card."
+                                   : "Verified, but not yet safe to clear. Keep the card."
+            case .verdictNotCurrent: return "The earlier verdict no longer covers this card. Eject asks first."
+            case .destinationCheckPending: return "Still re-checking the copies. Don't wipe yet."
+            case .notOffloaded: return "Not offloaded yet. Eject asks first."
+            case .journalUnavailable: return "Job journal unavailable. Eject asks first."
             }
         }
     }

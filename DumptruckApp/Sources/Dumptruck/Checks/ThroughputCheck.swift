@@ -316,10 +316,10 @@ stallTier.recordThroughput(0, phase: "copy")
 stallTier.noteFileActivity()
 let tierT0 = Date()
 stallTier.sampleThroughput(at: tierT0.addingTimeInterval(20))
-require(stallTier.stallObservation == "I/O stalled 20s — check cables and drives",
+require(stallTier.stallObservation == "I/O stalled 20s: check cables and drives",
         "the existing 20-second stall tier changed")
 stallTier.sampleThroughput(at: tierT0.addingTimeInterval(120))
-require(stallTier.stallObservation == "engine may have hung — no bytes for 2 minutes",
+require(stallTier.stallObservation == "engine may have hung: no bytes for 2 minutes",
         "the 120-second engine-hang observation did not raise")
 stallTier.recordThroughput(1, phase: "copy")
 require(stallTier.stallSeconds == 0 && stallTier.stallObservation == nil,
@@ -350,7 +350,7 @@ verifyTail.sampleThroughput(at: tailT0.addingTimeInterval(33))
 require(verifyTail.stallSeconds == 3 && !verifyTail.verifyingCopies,
         "silence after the verify heartbeat did not count as a stall")
 verifyTail.sampleThroughput(at: tailT0.addingTimeInterval(53))
-require(verifyTail.stallObservation == "I/O stalled 23s — check cables and drives",
+require(verifyTail.stallObservation == "I/O stalled 23s: check cables and drives",
         "a real stall after the verify tail did not escalate")
 
 let heartbeatEvent = Job(label: "CARD", sourcePath: "/source", destinations: ["/dest"])

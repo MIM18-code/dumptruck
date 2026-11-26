@@ -43,7 +43,7 @@ enum SetupFlowCheck {
         }
         for problem in [AppModel.sourceChangedReason, AppModel.runningTransferReason,
                         AppModel.sourceOverlapReason,
-                        "Job journal unavailable — resolve it before starting a transfer"] {
+                        "Job journal unavailable. Resolve it before starting a transfer."] {
             require(!AppModel.isNextStepReason(problem), "\(problem) is a problem")
         }
 

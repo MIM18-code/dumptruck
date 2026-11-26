@@ -301,6 +301,36 @@ enum LooseSourceStagingCheck {
                 "the card the picks came from leaves the batch: "
                 + "\(model.batchStagingModel.candidates.map(\.path))")
         model.batchStagingModel.cancelStaging()
+        // 10b. Choosing files from a staged source card's menu replaces that
+        //      source directly, even when picking from a sibling folder on
+        //      the card, and refuses files whose folder is already a
+        //      destination without leaving an orphan staging folder behind.
+        require(model.assign(drive + "/DCIM/A001", as: .source), "stage subfolder on drive")
+        require(model.stagePickedSourceFiles([pickB], replacingCurrentSource: true),
+                "picking files from the staged source card replaces it")
+        guard let replacedSet = model.sourcePath, LooseSourceStaging.isSelectionSet(replacedSet) else {
+            fatalError("replacing source pick must stage a selection set")
+        }
+        require(model.batchStagingModel.candidates.isEmpty,
+                "replacing from the source card must not create a batch")
+        require(model.stagePickedSourceFiles([pickA], replacingCurrentSource: true),
+                "re-picking from another folder on the card replaces the previous pick")
+        guard let secondReplacedSet = model.sourcePath, secondReplacedSet != replacedSet else {
+            fatalError("re-picking must stage the new selection set")
+        }
+        require(!fm.fileExists(atPath: replacedSet), "replaced selection set must be cleaned up")
+        require(model.batchStagingModel.candidates.isEmpty, "re-picking stays single")
+        model.clearSource()
+        require(!fm.fileExists(atPath: secondReplacedSet), "clearing releases the replaced pick")
+        require(model.assign(drive + "/DCIM", as: .destination), "stage drive folder as destination")
+        let countBeforeOverlap = listing(stagingRoot.path).count
+        require(!model.stagePickedSourceFiles([pickA], replacingCurrentSource: true),
+                "picking files inside a staged destination must be refused")
+        require(model.lastSetupError != nil, "refused pick must explain why")
+        require(model.sourcePath == nil, "refused pick must not stage a source")
+        require(listing(stagingRoot.path).count == countBeforeOverlap,
+                "refused pick must leave no staging folder behind")
+        model.unassignDestination(drive + "/DCIM")
         // 11. {VolumeName} for a pick is the drive its files are on, or the
         //     folder they came from, never the staging folder (tester
         //     follow-up, 2026-11-03).

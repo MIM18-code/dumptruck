@@ -62,7 +62,7 @@ struct CapacityGauge: View {
             }
             .help(belowFullCard
                   ? "Free space is below the card's full size. This is not an exact requirement: continuations may need far less, and the engine checks the exact absent bytes at Start."
-                  : "How full this volume is — not transfer progress")
+                  : "How full this drive is, not transfer progress")
         }
     }
 }
@@ -84,7 +84,7 @@ struct FullnessGauge: View {
                     .font(Typo.evidence.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            .help("How much footage is on the card — not transfer progress")
+            .help("How much footage is on the card, not transfer progress")
         }
     }
 }

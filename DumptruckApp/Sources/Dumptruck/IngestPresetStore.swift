@@ -134,7 +134,7 @@ final class IngestPresetStore: ObservableObject {
             return "A preset needs existing destination folders with valid absolute paths."
         }
         guard let mirrored = Self.normalizedRelativeFolder(rawMirrored) else {
-            return "The mirrored destination folder must be a safe relative folder path."
+            return "The destination folder must be a safe relative folder path."
         }
         guard let extras = Self.normalizedExtraFolders(rawExtras, anchors: anchors) else {
             return "An extra destination folder must sit inside one of the preset's drives."
@@ -151,7 +151,7 @@ final class IngestPresetStore: ObservableObject {
             let preset: IngestPreset
             if let existingIndex {
                 guard confirmOverwrite else {
-                    return "A preset named \"\(name)\" already exists — confirm replacement before saving over it."
+                    return "A preset named \"\(name)\" already exists. Confirm replacement before saving over it."
                 }
                 let old = next[existingIndex]
                 preset = IngestPreset(id: old.id, name: name,
@@ -540,7 +540,7 @@ enum IngestPresetEndpointValidator {
             return "This preset has no destination folders."
         }
         guard IngestPresetStore.normalizedRelativeFolder(mirroredFolder) != nil else {
-            return "This preset's mirrored folder is not a safe relative path."
+            return "This preset's destination folder is not a safe relative path."
         }
         var normalized: [String] = []
         for anchor in destinationAnchors {
@@ -555,7 +555,7 @@ enum IngestPresetEndpointValidator {
             }
             if path.hasPrefix("/Volumes/") {
                 guard mountedRoots.contains(where: { isContained(path, in: $0) }) else {
-                    return "Destination \(path) is not on a currently mounted drive — reinsert it and apply the preset again."
+                    return "Destination \(path) is not on a currently mounted drive. Reinsert it and apply the preset again."
                 }
             }
             let resolved = (path as NSString).resolvingSymlinksInPath
@@ -564,10 +564,10 @@ enum IngestPresetEndpointValidator {
             }
             if let sourcePath, fileManager.fileExists(atPath: sourcePath),
                pathsOverlap(path, sourcePath) {
-                return "Preset destination \(path) overlaps the current source — choose another preset or source."
+                return "Preset destination \(path) overlaps the current source. Choose another preset or source."
             }
             guard !normalized.contains(where: { pathsOverlap($0, path) }) else {
-                return "Preset destinations overlap each other at \(path) — choose separate folders or drives."
+                return "Preset destinations overlap each other at \(path). Choose separate folders or drives."
             }
             if let error = validateProjectedComponents(root: path,
                                                        mirroredFolder: mirroredFolder,
@@ -619,19 +619,19 @@ enum IngestPresetEndpointValidator {
             var info = Darwin.stat()
             guard Darwin.lstat(current, &info) == 0 else {
                 if errno == ENOENT { return nil }
-                return "Could not inspect projected destination \(current) — preset application refused."
+                return "Could not inspect destination folder \(current). Preset was not applied."
             }
             let type = info.st_mode & S_IFMT
             if type == S_IFLNK {
-                return "Projected destination \(current) is a symlink — choose a real folder before applying this preset."
+                return "Destination folder \(current) is a symlink. Choose a real folder before applying this preset."
             }
             guard type == S_IFDIR else {
-                return "Projected destination \(current) is a regular file, not a directory — remove the obstruction before applying this preset."
+                return "Destination folder \(current) is a regular file, not a directory. Remove the obstruction before applying this preset."
             }
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: current, isDirectory: &isDirectory),
                   isDirectory.boolValue else {
-                return "Projected destination \(current) is not an existing directory — preset application refused."
+                return "Destination folder \(current) is not an existing directory. Preset was not applied."
             }
         }
         return nil
@@ -639,7 +639,7 @@ enum IngestPresetEndpointValidator {
 
     private static func missingReason(for path: String) -> String {
         if path.hasPrefix("/Volumes/") {
-            return "Destination \(path) is missing or its drive is not mounted — reinsert it and apply the preset again."
+            return "Destination \(path) is missing or its drive is not mounted. Reinsert it and apply the preset again."
         }
         return "Destination \(path) is missing or is not an existing directory."
     }

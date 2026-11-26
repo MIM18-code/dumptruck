@@ -32,7 +32,7 @@ struct SaveIngestPresetSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Save ingest preset")
                 .font(.title3.weight(.semibold))
-            Text("This saves the current destination anchors, mirrored folder, organization template, verification, report, and queue settings. It never saves a card identity or starts a transfer.")
+            Text("This saves the current destinations, destination folder, folder template, verification, report, and queue settings. It never saves a card or starts a transfer.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

@@ -341,8 +341,8 @@ private struct ShelfTile: View {
                     .menuIndicator(.hidden)
                     .fixedSize()
                     .foregroundStyle(.secondary)
-                    .help("Use a folder inside \(displayName) instead of the whole drive")
-                    .accessibilityLabel("Choose a folder inside \(displayName)")
+                    .help("Choose a folder or files inside \(displayName) instead of the whole drive")
+                    .accessibilityLabel("Choose a folder or files inside \(displayName)")
                 }
             }
         }
@@ -377,7 +377,7 @@ private struct ShelfTile: View {
             }
         }
         if canDestination {
-            Button("Choose Mirrored Folder Inside…") {
+            Button("Choose Destination Folder Inside…") {
                 model.chooseFolder(inside: endpoint.path, as: .destination)
             }
         }

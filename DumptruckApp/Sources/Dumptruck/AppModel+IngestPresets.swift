@@ -120,7 +120,7 @@ extension AppModel {
                 organizationFolder: "")
             if FileManager.default.fileExists(atPath: projected),
                (projected as NSString).resolvingSymlinksInPath != projected {
-                let error = "Mirrored destination folder \(projected) is a symlink — choose the real folder before applying this preset."
+                let error = "Destination folder \(projected) is a symlink. Choose the real folder before applying this preset."
                 lastSetupError = error
                 return error
             }
@@ -277,7 +277,7 @@ extension AppModel {
             if destinationAnchors.contains(where: { candidate in
                 occupied.contains { IngestPresetEndpointValidator.overlaps(candidate, $0) }
             }) {
-                return "A preset destination overlaps the running transfer \(job.label) — wait for it to finish before changing destinations."
+                return "A preset destination overlaps the running transfer \(job.label). Wait for it to finish before changing destinations."
             }
         }
         return nil

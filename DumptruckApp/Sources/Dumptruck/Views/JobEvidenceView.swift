@@ -107,7 +107,7 @@ struct JobEvidenceView: View {
                 .foregroundStyle(Semantics.destinationText)
                 .font(.body)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Recorded evidence — receipt is not cryptographically sealed")
+                Text("Recorded evidence (receipt is not cryptographically sealed)")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Semantics.destinationText)
                 Text("Recorded checksums are useful copy evidence, but this unsigned receipt is not a source-wipe or eject authority. Only the current Job verdict and engine protocol can establish that safety.")

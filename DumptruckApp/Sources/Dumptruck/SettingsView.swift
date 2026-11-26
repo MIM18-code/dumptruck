@@ -94,7 +94,7 @@ private struct IngestPresetSettingsView: View {
 
     var body: some View {
         Form {
-            Text("Named presets save destination anchors and the ingest settings that travel with them. Applying one validates the currently mounted drives first; it never creates folders, starts a transfer, or grants a verdict.")
+            Text("Named presets save destination drives and the transfer settings that travel with them. Applying one checks that those drives are mounted first; it never creates folders, starts a transfer, or marks a card safe.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -145,7 +145,7 @@ private struct IngestPresetSettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if !preset.mirroredDestinationFolder.isEmpty {
-                            Text("mirror …/\(preset.mirroredDestinationFolder)")
+                            Text("into …/\(preset.mirroredDestinationFolder)")
                                 .font(.caption.monospaced())
                                 .foregroundStyle(.tertiary)
                                 .lineLimit(1)
@@ -233,8 +233,8 @@ private struct TransferSettings: View {
             Section {
                 settingRow(caption: "One-at-a-time keeps a spinning backup drive from thrashing between two write streams.") {
                     Picker("Queueing", selection: $queueMode) {
-                        Text("Off — all transfers run at the same time").tag("off")
-                        Text("One transfer at a time — later cards wait their turn").tag("single")
+                        Text("Off: all transfers run at the same time").tag("off")
+                        Text("One transfer at a time: later cards wait their turn").tag("single")
                     }
                     .pickerStyle(.radioGroup)
                 }
@@ -252,8 +252,8 @@ private struct TransferSettings: View {
                 }
 
                 Picker("Verification", selection: $verifyMode) {
-                    Text("Full — every destination byte re-read and compared").tag("full")
-                    Text("Fast — size check only, not verified").tag("fast")
+                    Text("Full: every destination byte re-read and compared").tag("full")
+                    Text("Fast: size check only, not verified").tag("fast")
                 }
                 .pickerStyle(.radioGroup)
                 if verifyMode == "fast" {
@@ -324,7 +324,7 @@ private struct TransferSettings: View {
                 + "SHA-256 and C4 to the receipt. Lets a topped-up card be "
                 + "called safe to clear."
         case .custom:
-            return "Your own mix — set the individual controls below."
+            return "Your own mix. Set the individual controls below."
         }
     }
 
@@ -390,7 +390,7 @@ private struct OrganizeSettings: View {
                     .monospaced()
                     .frame(width: 320)
             }
-            settingRow(caption: "The card-name folder is always appended last — it is the continuation key. Card folders must keep resolving to the same path for top-ups to work, so avoid date tokens in the standing template.") {
+            settingRow(caption: "The card-name folder is always added last so top-ups find earlier copies. Card folders need to stay at the same path for top-ups to work, so avoid date tokens in the standing template.") {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 6) {
                         ForEach(tokens.prefix(5), id: \.self) { t in
@@ -475,7 +475,7 @@ private struct ReportSettings: View {
 
     var body: some View {
         Form {
-            settingRow(caption: "Written to Reports/ at each destination plus a local library copy — never inside the sealed card folder.") {
+            settingRow(caption: "Written to Reports/ at each destination plus a local library copy, never inside the sealed card folder.") {
                 Toggle("Generate an HTML + PDF report after every offload", isOn: $makeReports)
             }
 
@@ -514,7 +514,7 @@ private struct CardSettings: View {
             Section {
                 Toggle("Notify when a transfer finishes", isOn: $notifyOnCompletion)
                 Toggle("Truck sound effects (start / done / failed)", isOn: $soundEffects)
-                settingRow(caption: "Force Touch trackpads only — a plain mouse or an external trackpad without haptics feels nothing either way.") {
+                settingRow(caption: "Force Touch trackpads only. A plain mouse or an external trackpad without haptics feels nothing either way.") {
                     Toggle("Trackpad haptics (drops, blocked actions, milestones, verdicts)", isOn: $haptics)
                 }
             }
@@ -536,7 +536,7 @@ private struct CardSettings: View {
                             .font(.caption)
                             .foregroundStyle(Semantics.warningText)
                     }
-                    settingRow(caption: "Saved securely in the macOS Keychain — never stored in settings preferences, journals, or reports.") {
+                    settingRow(caption: "Saved securely in the macOS Keychain, never stored in settings preferences, journals, or reports.") {
                         LabeledContent("Bearer secret (optional)") {
                             SecureField("Secret token stored in Keychain", text: $bearerSecret)
                                 .textFieldStyle(.roundedBorder)
@@ -606,7 +606,7 @@ private struct DisplaySettings: View {
                 }
             }
             Section {
-                settingRow(caption: "Enlarges every label in the workbench, including verdicts, lane captions and rail echoes. Column widths are unchanged — long names truncate rather than reflow.") {
+                settingRow(caption: "Enlarges every label in the workbench, including verdicts, lane captions and rail echoes. Column widths stay the same, so long names truncate rather than reflow.") {
                     Picker("Text size", selection: $textScaleRaw) {
                         ForEach(TextScale.allCases) { s in Text(s.title).tag(s.rawValue) }
                     }
@@ -714,11 +714,11 @@ private struct EngineSettings: View {
             if p.terminationStatus != 0 {
                 return "Engine error: \(out.suffix(120))"
             } else if reported != EngineContract.protocolVersion {
-                return "Engine mismatch — app requires protocol "
+                return "Engine mismatch: app requires protocol "
                     + "\(EngineContract.protocolVersion), engine reports "
                     + "\(reported.map(String.init) ?? "none")"
             } else {
-                return "OK — \(summary)"
+                return "OK: \(summary)"
             }
         } catch {
             return "Launch failed: \(error.localizedDescription)"

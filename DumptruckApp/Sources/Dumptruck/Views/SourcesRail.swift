@@ -97,9 +97,9 @@ struct SourcesRail: View {
                         .labelStyle(RailFooterLabelStyle())
                 }
                 .buttonStyle(HoverHighlightButtonStyle())
-                .help("Copy FROM any folder — not just a whole card. Useful "
+                .help("Copy from any folder, not just a whole card. Useful "
                       + "when a drive holds several shoots and only one needs "
-                      + "offloading")
+                      + "offloading.")
                 Spacer()
             }
             HStack {
@@ -111,7 +111,7 @@ struct SourcesRail: View {
                 }
                 .buttonStyle(HoverHighlightButtonStyle())
                 .help("Copy only the clips you pick. Files on a drive copy "
-                      + "straight from it; you can also drag them here from Finder")
+                      + "straight from it; you can also drag them here from Finder.")
                 Spacer()
             }
             HStack {
@@ -122,9 +122,8 @@ struct SourcesRail: View {
                         .labelStyle(RailFooterLabelStyle())
                 }
                 .buttonStyle(HoverHighlightButtonStyle())
-                .help("Queue several cards or folders in one pass — one job "
-                      + "per card, run back to back against the same drives. "
-                      + "Built for end-of-day card piles")
+                .help("Queue several cards or folders in one pass, one job "
+                      + "per card against the same drives. Built for end-of-day card piles.")
                 Spacer()
             }
         }
@@ -289,6 +288,43 @@ struct SourceCard: View {
         model.volumes.first { pathIsAtOrInside(path, root: $0.path) }
     }
 
+    private var sourceLocationPath: String {
+        LooseSourceStaging.sourceLocationForDisplay(path)
+    }
+
+    private var browseVolume: Volume? {
+        if let volume { return volume }
+        guard !sourceLocationPath.isEmpty else { return nil }
+        return model.volumes.first { pathIsAtOrInside(sourceLocationPath, root: $0.path) }
+    }
+
+    private var browseStartPath: String? {
+        if !sourceLocationPath.isEmpty { return sourceLocationPath }
+        return volume?.path
+    }
+
+    private var sourceMenuTargetName: String {
+        model.endpointDisplayName(sourceLocationPath.isEmpty ? path : sourceLocationPath)
+    }
+
+    @ViewBuilder
+    private func sourcePickItems(start: String) -> some View {
+        Button("Choose Files Inside…") {
+            model.chooseSourceFiles(inside: start, replacingCurrentSource: true)
+        }
+        Button("Choose Folder Inside…") {
+            model.chooseFolder(inside: start, as: .source)
+        }
+        if let vol = browseVolume, path != vol.path {
+            Divider()
+            Button("Use All of \(vol.name)") {
+                RailMotion.run(reduceMotion: reduceMotion) {
+                    _ = model.assign(vol.path, as: .source)
+                }
+            }
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
@@ -300,10 +336,24 @@ struct SourceCard: View {
                     .font(.callout.weight(.medium))
                     .lineLimit(1).truncationMode(.middle)
                 Spacer()
-                if let vol = volume, !model.canEject(vol) {
+                if let vol = volume, !model.canEject(vol) && !model.ejectIsHarmless(vol) {
                     Image(systemName: "lock.fill")
                         .foregroundStyle(Semantics.warningText)
-                        .help("Transfer not verified — do not remove this volume")
+                        .help(model.ejectHold(vol)?.summary ?? "Transfer not verified. Do not remove this drive.")
+                }
+                if runningJob == nil, let start = browseStartPath {
+                    Menu {
+                        sourcePickItems(start: start)
+                    } label: {
+                        Image(systemName: "folder.badge.plus")
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(HoverHighlightButtonStyle())
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .foregroundStyle(Semantics.sourceText)
+                    .help("Choose specific files or a folder inside \(sourceMenuTargetName)")
+                    .accessibilityLabel("Choose files or folder inside \(sourceMenuTargetName)")
                 }
                 if let vol = volume {
                     EjectControl(volume: vol, forceEjectTarget: $forceEjectTarget)
@@ -367,12 +417,12 @@ struct SourceCard: View {
                     .font(Typo.safety)
                     .foregroundStyle(echoColor)
             } else if !model.sourceMutationMonitoringActive {
-                Label("live source monitoring unavailable — eject remains locked",
+                Label("live source monitoring unavailable, eject stays locked",
                       systemImage: "exclamationmark.triangle.fill")
                     .font(Typo.safety)
                     .foregroundStyle(Semantics.dangerText)
             } else if model.sourceChangedSinceVerification {
-                Label("source changed — verify again before removing",
+                Label("source changed, verify again before removing",
                       systemImage: "exclamationmark.triangle.fill")
                     .font(Typo.safety)
                     .foregroundStyle(Semantics.warningText)
@@ -386,16 +436,12 @@ struct SourceCard: View {
             model.ejectingVolumePaths.contains($0.path)
         } ?? false)
         .contextMenu {
-            if let vol = volume {
-                Button("Choose Folder Inside \(vol.name)…") {
-                    model.chooseFolder(inside: vol.path, as: .source)
-                }
-                Button("Choose Files on \(vol.name)…") {
-                    model.chooseSourceFiles(inside: vol.path)
-                }
+            if runningJob == nil, let start = browseStartPath {
+                sourcePickItems(start: start)
             }
             Button("Reveal in Finder") {
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+                let revealPath = sourceLocationPath.isEmpty ? path : sourceLocationPath
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: revealPath)])
             }
         }
         .draggable(URL(fileURLWithPath: path))
@@ -535,7 +581,7 @@ struct RailDropSlot: View {
             .strokeBorder(tint.opacity(0.35),
                           style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title) — \(subtitle)")
+        .accessibilityLabel("\(title). \(subtitle)")
     }
 }
 
@@ -583,11 +629,13 @@ struct RailSpine: View {
     /// (it is the interlock), then fill.
     private func spineValue(_ vol: Volume) -> String {
         var parts: [String] = []
-        parts.append(model.canEject(vol)
-            ? "not locked"
-            : (role == .source
-               ? "Transfer not verified — do not remove this volume"
-               : "Participating in a transfer — do not remove"))
+        let locked = !model.canEject(vol) && !model.ejectIsHarmless(vol)
+        parts.append(locked
+            ? (model.ejectHold(vol)?.summary
+               ?? (role == .source
+                   ? "Transfer not verified. Do not remove this drive."
+                   : "Transfer in progress. Do not remove this drive."))
+            : "not locked")
         if let total = vol.totalBytes, let free = vol.freeBytes, total > 0 {
             let pct = Int((Double(total - free) / Double(total) * 100).rounded())
             parts.append("\(pct) percent full, \(bytesString(free)) free")
@@ -606,13 +654,13 @@ struct RailSpine: View {
                 VStack(spacing: 2) {
                     Image(systemName: role == .source ? "sdcard.fill" : "externaldrive.fill")
                         .foregroundStyle(.secondary)
-                    if !model.canEject(vol) {
+                    if !model.canEject(vol) && !model.ejectIsHarmless(vol) {
                         Image(systemName: "lock.fill")
                             .imageScale(.small)
                             .foregroundStyle(Semantics.warningText)
                     }
                 }
-                .help("\(spineLabel(vol)) — \(spineValue(vol))")
+                .help("\(spineLabel(vol)): \(spineValue(vol))")
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(spineLabel(vol))
                 .accessibilityValue(spineValue(vol))

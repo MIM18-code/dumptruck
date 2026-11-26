@@ -670,7 +670,7 @@ enum DesktopQACheck {
                 "Ready cards enable Start even with a stale banner")
         // The live refusal is a broken template now that a blank project
         // name no longer refuses anything.
-        let badTemplateReason = "Folder template has an unknown token {Bogus} — fix it in Settings > Organize"
+        let badTemplateReason = "Folder template has an unknown token {Bogus}. Fix it in Settings > Organize."
         defaults.set("{Bogus}/Raws", forKey: Pref.folderTemplate)
         if case .failure(let error) = staging.queueBatch(appModel: model) {
             require(error == .preflightFailed(badTemplateReason),
@@ -899,7 +899,7 @@ enum DesktopQACheck {
         // With nothing Ready, Start says so and queues nothing more.
         let queuedSoFar = model.jobs.count
         if model.engineConfigurationError == nil {
-            require(model.batchStartBlockedReason == "The card in the batch can't start — Review Batch shows why",
+            require(model.batchStartBlockedReason == "The card in the batch can't start. Review Batch shows why.",
                     "a batch of one refused card explains itself: \(model.batchStartBlockedReason ?? "nil")")
         }
         if case .success = partial.queueBatch(appModel: model) {

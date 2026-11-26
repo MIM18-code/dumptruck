@@ -91,11 +91,11 @@ struct DestinationsRail: View {
                     .foregroundStyle(Semantics.destinationText)
             }
             if !model.destinationFolderRelativePath.isEmpty {
-                Text("mirror …/\(model.destinationFolderRelativePath)")
+                Text("into …/\(model.destinationFolderRelativePath)")
                     .font(Typo.evidenceQuiet.monospaced())
                     .foregroundStyle(.tertiary)
                     .lineLimit(1).truncationMode(.head)
-                    .help("This relative folder is created on every destination when the job starts")
+                    .help("This folder is used on every destination when the job starts")
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
@@ -144,11 +144,12 @@ struct DestinationsRail: View {
     private var railFooter: some View {
         HStack {
             if !model.destinationFolderRelativePath.isEmpty {
-                Button("Clear Mirror") {
+                Button("Clear Folder") {
                     model.clearMirroredDestinationFolder()
                 }
                 .font(.caption)
                 .buttonStyle(HoverHighlightButtonStyle())
+                .help("Copy into each drive's root instead of …/\(model.destinationFolderRelativePath)")
             }
             Spacer()
             presetMenu
@@ -156,18 +157,17 @@ struct DestinationsRail: View {
                 model.chooseFolder(as: "dest")
             } label: {
                 ViewThatFits(in: .horizontal) {
-                    Label("Mirrored Folder…", systemImage: "folder.badge.plus")
+                    Label("Select Destination Folder…", systemImage: "folder.badge.plus")
                         .fixedSize()
-                    Label("Mirror…", systemImage: "folder.badge.plus")
+                    Label("Select Folder…", systemImage: "folder.badge.plus")
                         .fixedSize()
                     Image(systemName: "folder.badge.plus")
                 }
                 .font(.caption)
             }
-            .accessibilityLabel("Choose Mirrored Folder")
+            .accessibilityLabel("Select Destination Folder")
             .buttonStyle(HoverHighlightButtonStyle())
-            .help("Copy TO an existing folder instead of a drive root — the "
-                  + "card folder is created inside it")
+            .help("Copy into an existing folder instead of a drive root. The card folder is created inside it.")
         }
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
@@ -346,10 +346,10 @@ struct DestinationCard: View {
                     .font(.callout.weight(.medium))
                     .lineLimit(1).truncationMode(.middle)
                 Spacer()
-                if let vol = volume, !model.canEject(vol) {
+                if let vol = volume, !model.canEject(vol) && !model.ejectIsHarmless(vol) {
                     Image(systemName: "lock.fill")
                         .foregroundStyle(Semantics.warningText)
-                        .help("Participating in a transfer — do not remove")
+                        .help(model.ejectHold(vol)?.summary ?? "Transfer in progress. Do not remove this drive.")
                 }
                 if let vol = volume, !isExtraFolder {
                     Button {
@@ -359,9 +359,9 @@ struct DestinationCard: View {
                     }
                     .buttonStyle(HoverHighlightButtonStyle())
                     .foregroundStyle(Semantics.destinationText)
-                    .help("Choose a mirrored folder on \(vol.name). The same relative folder "
-                          + "is created on every destination. Shortcut: ⇧⌘O")
-                    .accessibilityLabel("Choose mirrored folder on \(vol.name)")
+                    .help("Select a destination folder on \(vol.name). The same folder path "
+                          + "is used on every destination. Shortcut: ⇧⌘O")
+                    .accessibilityLabel("Select destination folder on \(vol.name)")
                     EjectControl(volume: vol, forceEjectTarget: $forceEjectTarget)
                 }
                 Button {
@@ -385,7 +385,7 @@ struct DestinationCard: View {
                     .font(Typo.evidence.monospaced())
                     .foregroundStyle(.tertiary)
                     .lineLimit(1).truncationMode(.head)
-                    .help("Mirrored destination folder + Organize template — the engine adds the card-name folder")
+                    .help("Destination folder + Organize template. The card-name folder goes inside it.")
             }
             // Extra folders take no Organize template, so its note does not
             // apply to them (Codex GUI review of 0.5.10).
@@ -413,7 +413,7 @@ struct DestinationCard: View {
         } ?? false)
         .contextMenu {
             if let vol = volume, !isExtraFolder {
-                Button("Choose Mirrored Folder Inside \(vol.name)…") {
+                Button("Select Destination Folder Inside \(vol.name)…") {
                     model.chooseDestinationFolder(on: vol.path)
                 }
                 if path == vol.path {

@@ -285,9 +285,9 @@ final class JobJournal {
         }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             close(fd)
-            _ = invalidate("another Dumptruck instance owns the job journal — "
-                           + "quit the other instance first; this window is "
-                           + "read-only to protect its verdict records")
+            _ = invalidate("Another Dumptruck instance owns the job journal. "
+                           + "Quit the other instance first; this window is "
+                           + "read-only to protect its verdict records.")
             return false
         }
         instanceLockFD = fd

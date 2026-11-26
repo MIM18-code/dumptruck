@@ -63,7 +63,7 @@ struct ContentView: View {
                 } label: {
                     Image(systemName: "clock.arrow.circlepath")
                 }
-                .help("Job History & CSV Export — search, filter, and export persistent transfer logs")
+                .help("Job History & CSV Export. Search, filter, and export transfer logs.")
                 .accessibilityLabel("Open Job History and CSV Export")
                 // Always present, by Joshua's explicit call (2026-08-26): an
                 // earlier facelift pass showed this only while a job ran, and
@@ -73,14 +73,14 @@ struct ContentView: View {
                 Button {
                     model.arcadeShown = true
                 } label: { Image(systemName: "gamecontroller") }
-                    .help("The Dump Yard — kill time while it hauls")
+                    .help("The Dump Yard: mini games while it hauls")
                     .accessibilityLabel("Open the Dump Yard arcade")
                 Button {
                     openWindow(id: "verify")
                 } label: {
                     Image(systemName: "checkmark.shield")
                 }
-                .help("Verify an existing destination folder against its sealed custody (\u{21E7}\u{2318}V)")
+                .help("Verify an existing destination folder against its saved checksums (\u{21E7}\u{2318}V)")
                 .accessibilityLabel("Verify an existing destination folder")
                 Button {
                     openWindow(id: "help")

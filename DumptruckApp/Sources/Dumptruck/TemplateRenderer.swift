@@ -266,7 +266,7 @@ enum TemplateRenderer {
                 token: token,
                 status: .malformed,
                 value: nil,
-                explanation: "Folder template has an unknown token {\(token)} — fix it in Settings > Organize"
+                explanation: "Folder template has an unknown token {\(token)}. Fix it in Settings > Organize."
             )
         }
 
@@ -356,7 +356,7 @@ enum TemplateRenderer {
                 return TokenReport(token: token, status: .resolved, value: val, explanation: "Resolved job ID: '\(val)'")
             }
         default:
-            return TokenReport(token: token, status: .malformed, value: nil, explanation: "Folder template has an unknown token {\(token)} — fix it in Settings > Organize")
+            return TokenReport(token: token, status: .malformed, value: nil, explanation: "Folder template has an unknown token {\(token)}. Fix it in Settings > Organize.")
         }
     }
 
@@ -368,21 +368,21 @@ enum TemplateRenderer {
         while i < template.endIndex {
             if template[i] == "{" {
                 guard let close = template[template.index(after: i)...].firstIndex(of: "}") else {
-                    reports.append(TokenReport(token: "", status: .malformed, value: nil, explanation: "Folder template has an unclosed { — fix it in Settings > Organize"))
+                    reports.append(TokenReport(token: "", status: .malformed, value: nil, explanation: "Folder template has an unclosed {. Fix it in Settings > Organize."))
                     break
                 }
                 let token = String(template[template.index(after: i)..<close])
                 if token.isEmpty {
-                    reports.append(TokenReport(token: "{}", status: .malformed, value: nil, explanation: "Folder template has an empty token {} — fix it in Settings > Organize"))
+                    reports.append(TokenReport(token: "{}", status: .malformed, value: nil, explanation: "Folder template has an empty token {}. Fix it in Settings > Organize."))
                 } else if token.contains("{") {
-                    reports.append(TokenReport(token: token, status: .malformed, value: nil, explanation: "Folder template has an unclosed { — fix it in Settings > Organize"))
+                    reports.append(TokenReport(token: token, status: .malformed, value: nil, explanation: "Folder template has an unclosed {. Fix it in Settings > Organize."))
                 } else if !seenTokens.contains(token) {
                     seenTokens.insert(token)
                     reports.append(evaluateToken(token, context: context))
                 }
                 i = template.index(after: close)
             } else if template[i] == "}" {
-                reports.append(TokenReport(token: "}", status: .malformed, value: nil, explanation: "Folder template has an unmatched } — fix it in Settings > Organize"))
+                reports.append(TokenReport(token: "}", status: .malformed, value: nil, explanation: "Folder template has an unmatched }. Fix it in Settings > Organize."))
                 i = template.index(after: i)
             } else {
                 i = template.index(after: i)
@@ -465,7 +465,7 @@ enum TemplateRenderer {
             return nil
         }
         if template.contains("\\") {
-            return "Folder template cannot contain '\\' — use '/' for subfolders"
+            return "Folder template cannot contain '\\'. Use '/' for subfolders."
         }
         if template.hasPrefix("/") {
             return "Folder template cannot start with / (must be a relative path)"
@@ -497,24 +497,24 @@ enum TemplateRenderer {
         while i < template.endIndex {
             if template[i] == "{" {
                 guard let close = template[template.index(after: i)...].firstIndex(of: "}") else {
-                    return "Folder template has an unclosed { — fix it in Settings > Organize"
+                    return "Folder template has an unclosed {. Fix it in Settings > Organize."
                 }
                 let token = String(template[template.index(after: i)..<close])
                 guard !token.isEmpty else {
-                    return "Folder template has an empty token {} — fix it in Settings > Organize"
+                    return "Folder template has an empty token {}. Fix it in Settings > Organize."
                 }
                 guard !token.contains("{") else {
-                    return "Folder template has an unclosed { — fix it in Settings > Organize"
+                    return "Folder template has an unclosed {. Fix it in Settings > Organize."
                 }
                 guard token.count <= maxTokenNameLength else {
                     return "Folder template token exceeds maximum length of \(maxTokenNameLength) characters"
                 }
                 guard knownTokens.contains(token) else {
-                    return "Folder template has an unknown token {\(token)} — fix it in Settings > Organize"
+                    return "Folder template has an unknown token {\(token)}. Fix it in Settings > Organize."
                 }
                 i = template.index(after: close)
             } else if template[i] == "}" {
-                return "Folder template has an unmatched } — fix it in Settings > Organize"
+                return "Folder template has an unmatched }. Fix it in Settings > Organize."
             } else {
                 i = template.index(after: i)
             }
@@ -536,7 +536,7 @@ enum TemplateRenderer {
         while i < template.endIndex {
             if template[i] == "{" {
                 guard let close = template[template.index(after: i)...].firstIndex(of: "}") else {
-                    return "Folder template has an unclosed { — fix it in Settings > Organize"
+                    return "Folder template has an unclosed {. Fix it in Settings > Organize."
                 }
                 let token = String(template[template.index(after: i)..<close])
                 if let val = tokenValue(token, context: context) {

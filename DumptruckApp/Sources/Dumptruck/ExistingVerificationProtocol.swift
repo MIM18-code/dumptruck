@@ -345,7 +345,7 @@ enum ExistingVerificationEvaluator {
                        summary: ExistingVerificationSummary?,
                        stderr: String) -> ExistingVerificationOutcome {
         if cancelled {
-            return .failed(reason: "Verification cancelled — no custody authority was granted.",
+            return .failed(reason: "Verification cancelled. No custody authority was granted.",
                            summary: summary)
         }
         if let protocolError {

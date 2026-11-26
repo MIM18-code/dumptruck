@@ -938,8 +938,8 @@ final class Job: ObservableObject, Identifiable {
         // Finder browsing no longer lands here (source watchers ignore its
         // .DS_Store, "._" sidecars and tags), so this is a real change to a
         // file on the card: say that plainly (Joshua, 2026-09-28).
-        error("source changed after Start — a file on the card was added, removed, renamed "
-              + "or rewritten while it was copying. This run cannot authorize wiping the card")
+        error("source changed after Start: a file on the card was added, removed, renamed "
+              + "or rewritten while it was copying. This run cannot authorize wiping the card.")
         return true
     }
 
@@ -975,7 +975,7 @@ final class Job: ObservableObject, Identifiable {
         destinationAuthorityWithdrawn = reason
         destinationAuthorityWithdrawnRoot = root
         destinationAuthorityWithdrawnByEjection = ejected && root != nil
-        warn("current wipe authority withdrawn — \(reason). The verdict above "
+        warn("current wipe authority withdrawn: \(reason). The verdict above "
              + "records what this run proved; verify the copies again before wiping.")
         return true
     }
@@ -1004,7 +1004,7 @@ final class Job: ObservableObject, Identifiable {
         phase = .failed
         fullyVerified = false
         safeToWipe = false
-        let message = "job journal could not record the terminal result — "
+        let message = "job journal could not record the terminal result: "
             + Job.Verdict.failed.displayLine + " (\(detail))"
         if !messages.contains(where: { $0.text == message }) {
             error(message)
@@ -1139,10 +1139,10 @@ final class Job: ObservableObject, Identifiable {
     /// counter. The 120-second tier names a possibility, never a diagnosis.
     var stallObservation: String? {
         if stallSeconds >= 120 {
-            return "engine may have hung — no bytes for 2 minutes"
+            return "engine may have hung: no bytes for 2 minutes"
         }
         if stallSeconds >= 20 {
-            return "I/O stalled \(stallSeconds)s — check cables and drives"
+            return "I/O stalled \(stallSeconds)s: check cables and drives"
         }
         return nil
     }
